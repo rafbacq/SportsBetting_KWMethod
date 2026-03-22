@@ -11,12 +11,14 @@ import {
   placeOrder,
   sellPosition,
   isRealEvent,
+  isSportsEvent,
+  isLiveMatch,
   getSportsSubcategoryFromEvent,
 } from './services/kalshiApi';
 import './App.css';
 
 const TABS = ['Markets', 'Settings'];
-const POLL_INTERVAL = 15000;
+const POLL_INTERVAL = 10000; // 10s for live feel
 
 export default function App() {
   // ─── Auth ───────────────────────────────────────────────────────────
@@ -35,16 +37,15 @@ export default function App() {
 
   // ─── Filters ────────────────────────────────────────────────────────
   const [search, setSearch] = useState('');
-  const [category, setCategory] = useState('All');
   const [subcategory, setSubcategory] = useState(null);
 
-  // ─── Fetch events ───────────────────────────────────────────────────
+  // ─── Fetch events (sports only) ───────────────────────────────────
   const fetchEvents = useCallback(async () => {
     try {
       const data = await getAllEvents(15);
-      // Filter out MVE combo events
-      const real = data.filter(isRealEvent);
-      setEvents(real);
+      // Filter: real events + sports only + actual live matches (not long-term predictions)
+      const sportsOnly = data.filter(e => isRealEvent(e) && isSportsEvent(e) && isLiveMatch(e));
+      setEvents(sportsOnly);
       setError(null);
     } catch (e) {
       console.error('Failed to fetch events:', e);
@@ -66,39 +67,22 @@ export default function App() {
     getBalance(auth).then((b) => setBalance(b.balance)).catch(() => setBalance(null));
   }, [auth]);
 
-  // ─── Category counts ───────────────────────────────────────────────
-  const categoryCounts = useMemo(() => {
-    const counts = {};
-    events.forEach((e) => {
-      const cat = e.category || 'Other';
-      counts[cat] = (counts[cat] || 0) + 1;
-    });
-    return counts;
-  }, [events]);
-
-  // ─── Subcategory counts (only for Sports) ──────────────────────────
+  // ─── Subcategory counts ──────────────────────────────────────────
   const subcategoryCounts = useMemo(() => {
-    if (category !== 'Sports') return {};
     const counts = {};
     events.forEach((e) => {
-      if ((e.category || 'Other') !== 'Sports') return;
       const sub = getSportsSubcategoryFromEvent(e);
       counts[sub] = (counts[sub] || 0) + 1;
     });
     return counts;
-  }, [events, category]);
+  }, [events]);
 
   // ─── Filtered events ───────────────────────────────────────────────
   const filteredEvents = useMemo(() => {
     let filtered = events;
 
-    // Category filter
-    if (category !== 'All') {
-      filtered = filtered.filter((e) => (e.category || 'Other') === category);
-    }
-
-    // Subcategory filter (Sports only)
-    if (category === 'Sports' && subcategory) {
+    // Subcategory filter
+    if (subcategory) {
       filtered = filtered.filter((e) => getSportsSubcategoryFromEvent(e) === subcategory);
     }
 
@@ -118,7 +102,7 @@ export default function App() {
     }
 
     return filtered;
-  }, [events, category, subcategory, search]);
+  }, [events, subcategory, search]);
 
   // ─── Auth handlers ──────────────────────────────────────────────────
   async function handleConnect(keyId, privateKeyPem) {
@@ -141,12 +125,12 @@ export default function App() {
 
   // ─── Trading handlers ──────────────────────────────────────────────
   async function handlePlaceOrder(ticker, side, count) {
-    await placeOrder(auth, { ticker, side, count });
+    await placeOrder(auth, { ticker, side, count: parseInt(count, 10) });
     if (auth) getBalance(auth).then((b) => setBalance(b.balance)).catch(() => {});
   }
 
   async function handleSell(ticker, side, count) {
-    await sellPosition(auth, { ticker, side, count });
+    await sellPosition(auth, { ticker, side, count: parseInt(count, 10) });
     if (auth) getBalance(auth).then((b) => setBalance(b.balance)).catch(() => {});
   }
 
@@ -154,8 +138,8 @@ export default function App() {
   return (
     <div className="app">
       <header className="app-header">
-        <h1>Kalshi Markets</h1>
-        <span className="app-header__subtitle">Real-time event contracts</span>
+        <h1>Kalshi Sports</h1>
+        <span className="app-header__subtitle">Live sports betting markets</span>
         {auth && (
           <span className="app-header__balance">
             Balance: ${balance != null ? (balance / 100).toFixed(2) : '...'}
@@ -181,11 +165,8 @@ export default function App() {
             <div className="markets-view__controls">
               <SearchBar value={search} onChange={setSearch} />
               <FilterBar
-                activeCategory={category}
                 activeSubcategory={subcategory}
-                onCategoryChange={setCategory}
                 onSubcategoryChange={setSubcategory}
-                categoryCounts={categoryCounts}
                 subcategoryCounts={subcategoryCounts}
               />
             </div>
@@ -208,7 +189,7 @@ export default function App() {
             </div>
 
             {!loading && filteredEvents.length === 0 && !error && (
-              <p className="empty-state">No events found. Try adjusting your search or filters.</p>
+              <p className="empty-state">No live sports matches found right now. Check back during game time.</p>
             )}
           </div>
         )}

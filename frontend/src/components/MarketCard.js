@@ -2,20 +2,25 @@ import React from 'react';
 import { formatCents, formatVolume } from '../services/kalshiApi';
 
 /**
- * Displays a Kalshi event with its nested market outcomes.
- * Shows event title, subtitle, category badge, and outcome prices.
+ * Dark-themed market card with LIVE badge and probability percentages.
  */
 export default function MarketCard({ event, onClick }) {
   const markets = event.markets || [];
   const totalVolume = markets.reduce((s, m) => s + parseFloat(m.volume_fp || 0), 0);
 
+  // Check if any market is active/open
+  const isLive = markets.some(m => m.status === 'active' || m.status === 'open');
+
   return (
     <div className="market-card" onClick={onClick}>
       <div className="market-card__header">
         <span className="market-card__category">{event.category}</span>
-        {totalVolume > 0 && (
-          <span className="market-card__volume">Vol {formatVolume(totalVolume)}</span>
-        )}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          {isLive && <span className="market-card__live-badge">● LIVE</span>}
+          {totalVolume > 0 && (
+            <span className="market-card__volume">Vol {formatVolume(totalVolume)}</span>
+          )}
+        </div>
       </div>
 
       <div className="market-card__title">{event.title}</div>
@@ -35,24 +40,21 @@ export default function MarketCard({ event, onClick }) {
 
 function MarketOutcome({ market }) {
   const label = market.yes_sub_title || market.title || market.ticker;
-  const yesBid = formatCents(market.yes_bid_dollars);
-  const yesAsk = formatCents(market.yes_ask_dollars);
   const lastPrice = parseFloat(market.last_price_dollars || 0);
   const prevPrice = parseFloat(market.previous_price_dollars || lastPrice);
   const diff = lastPrice - prevPrice;
-  const vol = parseFloat(market.volume_fp || 0);
+  const prob = Math.round(lastPrice * 100);
 
   return (
     <div className="outcome">
       <span className="outcome__label">{label}</span>
       <div className="outcome__prices">
-        <span className="outcome__price">{yesBid}</span>
+        <span className="outcome__price">{prob}%</span>
         {diff !== 0 && (
           <span className={`outcome__change ${diff > 0 ? 'outcome__change--up' : 'outcome__change--down'}`}>
             {diff > 0 ? '+' : ''}{(diff * 100).toFixed(0)}¢
           </span>
         )}
-        {vol > 0 && <span className="outcome__vol">{formatVolume(vol)}</span>}
       </div>
     </div>
   );

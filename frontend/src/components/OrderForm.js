@@ -1,11 +1,13 @@
 import React, { useState } from 'react';
 
 /**
- * Order form for buying YES/NO contracts or selling existing positions.
+ * Order form for buying/selling YES/NO contracts.
+ * Always shows both Buy and Sell buttons.
+ * Ensures count is sent as integer.
  *
  * Props:
  *   market      — market object with ticker, yes/no prices
- *   auth         — { keyId, privateKey } or null if not connected
+ *   auth        — { keyId, privateKey } or null if not connected
  *   onPlaceOrder — async (ticker, side, count) => void
  *   onSell       — async (ticker, side, count) => void
  *   position     — user's current position in this market (null if none)
@@ -35,7 +37,7 @@ export default function OrderForm({ market, auth, onPlaceOrder, onSell, position
     setError(null);
     setSuccess(null);
     try {
-      await onPlaceOrder(market.ticker, side, count);
+      await onPlaceOrder(market.ticker, side, parseInt(count, 10));
       setSuccess(`Bought ${count} ${side.toUpperCase()} @ ${side === 'yes' ? (yesPrice * 100).toFixed(0) : (noPrice * 100).toFixed(0)}¢`);
     } catch (e) {
       setError(e.message);
@@ -49,7 +51,7 @@ export default function OrderForm({ market, auth, onPlaceOrder, onSell, position
     setError(null);
     setSuccess(null);
     try {
-      await onSell(market.ticker, side, count);
+      await onSell(market.ticker, side, parseInt(count, 10));
       setSuccess(`Sold ${count} ${side.toUpperCase()} contracts`);
     } catch (e) {
       setError(e.message);
@@ -57,8 +59,6 @@ export default function OrderForm({ market, auth, onPlaceOrder, onSell, position
       setLoading(false);
     }
   }
-
-  const hasPosition = position && (position.total_traded > 0 || position.position > 0);
 
   return (
     <div className="order-form">
@@ -98,11 +98,9 @@ export default function OrderForm({ market, auth, onPlaceOrder, onSell, position
         <button className="btn btn--buy" onClick={handleBuy} disabled={loading}>
           {loading ? 'Placing...' : 'Buy'}
         </button>
-        {hasPosition && (
-          <button className="btn btn--sell" onClick={handleSell} disabled={loading}>
-            {loading ? 'Selling...' : 'Sell'}
-          </button>
-        )}
+        <button className="btn btn--sell" onClick={handleSell} disabled={loading}>
+          {loading ? 'Selling...' : 'Sell'}
+        </button>
       </div>
 
       {error && <div className="order-form__error">{error}</div>}

@@ -157,13 +157,14 @@ async function request(method, path, { params, body, auth } = {}) {
 
 // ─── Events (public — the primary way to browse markets) ────────────────────────
 
-export async function getEvents({ limit = 200, cursor, seriesTicker, withNestedMarkets = true } = {}) {
+export async function getEvents({ limit = 200, cursor, seriesTicker, withNestedMarkets = true, status } = {}) {
   const data = await request('GET', '/events', {
     params: {
       limit,
       cursor,
       series_ticker: seriesTicker,
       with_nested_markets: withNestedMarkets,
+      status,
     },
   });
   return { events: data.events || [], cursor: data.cursor || '' };
@@ -209,6 +210,28 @@ export async function getCandlesticks(ticker, { startTs, endTs, periodInterval =
 }
 
 /**
+ * Fetch candlesticks for multiple market tickers at once (for multi-line chart).
+ * Returns { [ticker]: candles[] }
+ */
+export async function getMultiCandlesticks(tickers, { startTs, endTs, periodInterval = 60 } = {}) {
+  if (!tickers || tickers.length === 0) return {};
+  const now = Math.floor(Date.now() / 1000);
+  const data = await request('GET', '/markets/candlesticks', {
+    params: {
+      market_tickers: tickers.join(','),
+      start_ts: startTs || now - 86400,
+      end_ts: endTs || now,
+      period_interval: periodInterval,
+    },
+  });
+  const result = {};
+  for (const entry of (data.markets || [])) {
+    result[entry.market_ticker] = entry.candlesticks || [];
+  }
+  return result;
+}
+
+/**
  * Fetch candlesticks with automatic fallback to longer time windows.
  * Tries the requested period first, then progressively wider windows.
  */
@@ -231,7 +254,7 @@ export async function getCandlesticksWithFallback(ticker, seconds, interval) {
   ];
 
   for (const fb of fallbacks) {
-    if (fb.seconds <= seconds) continue; // skip if smaller than what we already tried
+    if (fb.seconds <= seconds) continue;
     candles = await getCandlesticks(ticker, {
       startTs: now - fb.seconds,
       endTs: now,
@@ -243,6 +266,45 @@ export async function getCandlesticksWithFallback(ticker, seconds, interval) {
   return candles;
 }
 
+/**
+ * Fetch candlesticks for all markets in an event, with fallback.
+ * Returns { [ticker]: candles[] }
+ */
+export async function getEventCandlesticks(markets, seconds, interval) {
+  const tickers = markets.map(m => m.ticker).filter(Boolean);
+  if (tickers.length === 0) return {};
+  const now = Math.floor(Date.now() / 1000);
+
+  let result = await getMultiCandlesticks(tickers, {
+    startTs: now - seconds,
+    endTs: now,
+    periodInterval: interval,
+  });
+
+  // Check if we got data
+  const hasData = Object.values(result).some(c => c.length >= 2);
+  if (hasData) return result;
+
+  // Fallback to wider windows
+  const fallbacks = [
+    { seconds: 7 * 86400, interval: 3600 },
+    { seconds: 30 * 86400, interval: 14400 },
+    { seconds: 90 * 86400, interval: 86400 },
+  ];
+
+  for (const fb of fallbacks) {
+    if (fb.seconds <= seconds) continue;
+    result = await getMultiCandlesticks(tickers, {
+      startTs: now - fb.seconds,
+      endTs: now,
+      periodInterval: fb.interval,
+    });
+    if (Object.values(result).some(c => c.length >= 2)) return result;
+  }
+
+  return result;
+}
+
 // ─── Portfolio (auth required) ──────────────────────────────────────────────────
 
 export async function getBalance(auth) {
@@ -251,15 +313,48 @@ export async function getBalance(auth) {
 }
 
 export async function placeOrder(auth, { ticker, side, type = 'market', count }) {
-  const body = { ticker, action: 'buy', side, type, count };
-  const data = await request('POST', '/portfolio/orders', { auth, body });
-  return data.order;
+  const body = { ticker, action: 'buy', side, type, count: parseInt(count, 10) };
+  try {
+    const data = await request('POST', '/portfolio/orders', { auth, body });
+    return data.order;
+  } catch (e) {
+    // Parse Kalshi error format and ensure we always get a string message
+    let msg = String(e.message || 'Order failed');
+    try {
+      const jsonPart = msg.replace(/^Kalshi API \d+:\s*/, '');
+      const parsed = JSON.parse(jsonPart);
+      if (typeof parsed.message === 'string') msg = parsed.message;
+      else if (typeof parsed.error === 'string') msg = parsed.error;
+      else if (parsed.message) msg = JSON.stringify(parsed.message);
+      else if (parsed.error) msg = JSON.stringify(parsed.error);
+      else if (parsed.code) msg = `${parsed.code}: ${JSON.stringify(parsed)}`;
+      else msg = jsonPart;
+    } catch (_) {
+      // msg stays as the original string
+    }
+    throw new Error(msg);
+  }
 }
 
 export async function sellPosition(auth, { ticker, side, count }) {
-  const body = { ticker, action: 'sell', side, type: 'market', count };
-  const data = await request('POST', '/portfolio/orders', { auth, body });
-  return data.order;
+  const body = { ticker, action: 'sell', side, type: 'market', count: parseInt(count, 10) };
+  try {
+    const data = await request('POST', '/portfolio/orders', { auth, body });
+    return data.order;
+  } catch (e) {
+    let msg = String(e.message || 'Sell failed');
+    try {
+      const jsonPart = msg.replace(/^Kalshi API \d+:\s*/, '');
+      const parsed = JSON.parse(jsonPart);
+      if (typeof parsed.message === 'string') msg = parsed.message;
+      else if (typeof parsed.error === 'string') msg = parsed.error;
+      else if (parsed.message) msg = JSON.stringify(parsed.message);
+      else if (parsed.error) msg = JSON.stringify(parsed.error);
+      else if (parsed.code) msg = `${parsed.code}: ${JSON.stringify(parsed)}`;
+      else msg = jsonPart;
+    } catch (_) {}
+    throw new Error(msg);
+  }
 }
 
 // ─── Subcategory Detection ──────────────────────────────────────────────────────
@@ -316,6 +411,74 @@ export function isRealEvent(event) {
   if (ticker.includes('KXMVE')) return false;
   if (ticker.includes('MULTIGAME')) return false;
   return true;
+}
+
+/** Return true if event is a sports event (category check + title heuristic) */
+export function isSportsEvent(event) {
+  if ((event.category || '').toLowerCase() === 'sports') return true;
+  const title = (event.title || '').toLowerCase();
+  const sub = (event.sub_title || '').toLowerCase();
+  const blob = `${title} ${sub}`;
+  const sportsKw = [
+    'nba', 'nfl', 'mlb', 'nhl', 'ncaa', 'pga', 'golf', 'tennis', 'ufc',
+    'boxing', 'soccer', 'football', 'basketball', 'baseball', 'hockey',
+    'f1', 'nascar', 'premier league', 'la liga', 'champions league',
+    'serie a', 'bundesliga', 'mls', 'march madness', 'super bowl',
+    'world series', 'stanley cup', 'grand slam', 'masters',
+    'hainan', 'lpga', 'atp', 'wta', 'mma',
+  ];
+  return sportsKw.some(kw => blob.includes(kw));
+}
+
+/**
+ * Return true if the event is an actual live/ongoing match or competition
+ * (not a long-term prediction like "Will X happen before 2030?").
+ *
+ * Heuristics:
+ *   1. At least one market must have a close_time within the next 14 days
+ *   2. Reject events whose title contains multi-year future markers
+ */
+export function isLiveMatch(event) {
+  const markets = event.markets || [];
+  if (markets.length === 0) return false;
+
+  // Reject events with long-term prediction markers in title
+  const title = (event.title || '').toLowerCase();
+  const sub = (event.sub_title || '').toLowerCase();
+  const blob = `${title} ${sub}`;
+  const longTermPatterns = [
+    /before \d{4}/,           // "before 2030"
+    /by \d{4}/,               // "by 2030"
+    /in \d{4}/,               // "in 2030"
+    /\d{4} season/,           // "2031 season"
+    /\d{4}\?$/,              // ends with a year and ?
+    /will .+ ever/i,          // "Will X ever ..."
+    /bought and changed/,     // ownership bets
+    /new team/,               // expansion bets
+    /majority owner/,         // ownership bets
+    /head coach/,             // coaching hire bets
+    /relocat/,                // relocation bets
+    /expansion/,              // expansion bets
+    /retire/,                 // retirement bets
+    /hall of fame/,           // HoF bets
+  ];
+  if (longTermPatterns.some(p => p.test(blob))) return false;
+
+  // Check if any market closes within the next 14 days
+  const now = Date.now();
+  const fourteenDays = 14 * 24 * 60 * 60 * 1000;
+  const hasNearExpiry = markets.some(m => {
+    const closeTime = m.close_time || m.expiration_time || m.expected_expiration_time;
+    if (!closeTime) return false;
+    try {
+      const closeMs = new Date(closeTime).getTime();
+      return closeMs > now && closeMs < now + fourteenDays;
+    } catch (_) {
+      return false;
+    }
+  });
+
+  return hasNearExpiry;
 }
 
 /** Get the best market from an event (highest volume or first) */
