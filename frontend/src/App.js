@@ -5,7 +5,7 @@ import MarketCard from './components/MarketCard';
 import MarketDetail from './components/MarketDetail';
 import Settings from './components/Settings';
 import {
-  login,
+  importPrivateKey,
   getAllOpenMarkets,
   getBalance,
   placeOrder,
@@ -18,10 +18,10 @@ const TABS = ['Markets', 'Settings'];
 const POLL_INTERVAL = 15000; // 15s market refresh
 
 export default function App() {
-  // ─── Auth state ─────────────────────────────────────────────────────
-  const [token, setToken] = useState(() => sessionStorage.getItem('kalshi_token') || null);
+  // ─── Auth state (API key + CryptoKey) ───────────────────────────────
+  const [auth, setAuth] = useState(null); // { keyId, privateKey (CryptoKey) }
   const [balance, setBalance] = useState(null);
-  const [loginError, setLoginError] = useState(null);
+  const [connectError, setConnectError] = useState(null);
 
   // ─── Navigation ─────────────────────────────────────────────────────
   const [activeTab, setActiveTab] = useState('Markets');
@@ -57,17 +57,17 @@ export default function App() {
     return () => clearInterval(timer);
   }, [fetchMarkets]);
 
-  // ─── Fetch balance ──────────────────────────────────────────────────
+  // ─── Fetch balance when auth changes ────────────────────────────────
 
   useEffect(() => {
-    if (!token) {
+    if (!auth) {
       setBalance(null);
       return;
     }
-    getBalance(token)
+    getBalance(auth)
       .then((b) => setBalance(b.balance))
       .catch(() => setBalance(null));
-  }, [token]);
+  }, [auth]);
 
   // ─── Categorized + filtered markets ─────────────────────────────────
 
@@ -107,36 +107,39 @@ export default function App() {
 
   // ─── Auth handlers ──────────────────────────────────────────────────
 
-  async function handleLogin(email, password) {
-    setLoginError(null);
+  async function handleConnect(keyId, privateKeyPem) {
+    setConnectError(null);
     try {
-      const { token: t } = await login(email, password);
-      setToken(t);
-      sessionStorage.setItem('kalshi_token', t);
+      const cryptoKey = await importPrivateKey(privateKeyPem);
+      const newAuth = { keyId, privateKey: cryptoKey };
+      // Verify the key works by fetching balance
+      await getBalance(newAuth);
+      setAuth(newAuth);
     } catch (e) {
-      setLoginError(e.message);
+      setConnectError(e.message || 'Failed to connect. Check your API key and private key.');
+      throw e;
     }
   }
 
-  function handleLogout() {
-    setToken(null);
+  function handleDisconnect() {
+    setAuth(null);
     setBalance(null);
-    sessionStorage.removeItem('kalshi_token');
+    localStorage.removeItem('kalshi_key_id');
   }
 
   // ─── Trading handlers ──────────────────────────────────────────────
 
   async function handlePlaceOrder(ticker, side, count) {
-    await placeOrder(token, { ticker, side, count });
-    if (token) {
-      getBalance(token).then((b) => setBalance(b.balance)).catch(() => {});
+    await placeOrder(auth, { ticker, side, count });
+    if (auth) {
+      getBalance(auth).then((b) => setBalance(b.balance)).catch(() => {});
     }
   }
 
   async function handleSell(ticker, side, count) {
-    await sellPosition(token, { ticker, side, count });
-    if (token) {
-      getBalance(token).then((b) => setBalance(b.balance)).catch(() => {});
+    await sellPosition(auth, { ticker, side, count });
+    if (auth) {
+      getBalance(auth).then((b) => setBalance(b.balance)).catch(() => {});
     }
   }
 
@@ -147,7 +150,7 @@ export default function App() {
       <header className="app-header">
         <h1>Kalshi Markets</h1>
         <span className="app-header__subtitle">Real-time event contracts</span>
-        {token && (
+        {auth && (
           <span className="app-header__balance">
             Balance: ${balance != null ? (balance / 100).toFixed(2) : '...'}
           </span>
@@ -204,7 +207,7 @@ export default function App() {
         {activeTab === 'Markets' && selectedMarket && (
           <MarketDetail
             market={selectedMarket}
-            token={token}
+            auth={auth}
             onPlaceOrder={handlePlaceOrder}
             onSell={handleSell}
             onClose={() => setSelectedMarket(null)}
@@ -214,11 +217,11 @@ export default function App() {
 
         {activeTab === 'Settings' && (
           <Settings
-            token={token}
-            onLogin={handleLogin}
-            onLogout={handleLogout}
+            auth={auth}
+            onConnect={handleConnect}
+            onDisconnect={handleDisconnect}
             balance={balance}
-            loginError={loginError}
+            connectError={connectError}
           />
         )}
       </main>

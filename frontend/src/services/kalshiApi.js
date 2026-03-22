@@ -1,14 +1,42 @@
 /**
  * Kalshi API Client
  *
- * Handles authentication (email/password login) and all API interactions.
+ * Handles API key authentication (RSA-PSS signing) and all API interactions.
  * Public endpoints (markets, events, candlesticks) work without auth.
- * Trading endpoints (orders, positions) require authentication.
+ * Trading endpoints (orders, positions) require API key authentication.
  *
  * All requests go through the CRA dev proxy (setupProxy.js) to avoid CORS.
+ * The proxy forwards /trade-api/* to api.elections.kalshi.com/trade-api/*.
  */
 
 const API_PREFIX = '/trade-api/v2';
+
+// ─── RSA-PSS Signing (Web Crypto API) ───────────────────────────────────────────
+
+async function importPrivateKey(pemString) {
+  const pemBody = pemString
+    .replace(/-----BEGIN (?:RSA )?PRIVATE KEY-----/, '')
+    .replace(/-----END (?:RSA )?PRIVATE KEY-----/, '')
+    .replace(/\s/g, '');
+  const binaryDer = Uint8Array.from(atob(pemBody), (c) => c.charCodeAt(0));
+  return crypto.subtle.importKey(
+    'pkcs8',
+    binaryDer.buffer,
+    { name: 'RSA-PSS', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+}
+
+async function signRequest(privateKey, timestampMs, method, path) {
+  const message = new TextEncoder().encode(timestampMs + method + path);
+  const signature = await crypto.subtle.sign(
+    { name: 'RSA-PSS', saltLength: 32 },
+    privateKey,
+    message
+  );
+  return btoa(String.fromCharCode(...new Uint8Array(signature)));
+}
 
 // ─── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -22,13 +50,28 @@ function buildUrl(path, params = {}) {
   return url.toString();
 }
 
-async function request(method, path, { params, body, token } = {}) {
+/**
+ * Make an API request.
+ * @param {string} method - HTTP method
+ * @param {string} path - API path (e.g., /markets)
+ * @param {object} options
+ * @param {object} options.params - Query params
+ * @param {object} options.body - JSON body
+ * @param {object} options.auth - { keyId, privateKey (CryptoKey) } for signed requests
+ */
+async function request(method, path, { params, body, auth } = {}) {
   const url = buildUrl(path, params);
   const headers = { Accept: 'application/json' };
 
-  if (token) {
-    headers['Authorization'] = `Bearer ${token}`;
+  if (auth && auth.keyId && auth.privateKey) {
+    const timestampMs = String(Date.now());
+    const sigPath = `${API_PREFIX}${path}`; // sign the path without query params
+    const signature = await signRequest(auth.privateKey, timestampMs, method.toUpperCase(), sigPath);
+    headers['KALSHI-ACCESS-KEY'] = auth.keyId;
+    headers['KALSHI-ACCESS-TIMESTAMP'] = timestampMs;
+    headers['KALSHI-ACCESS-SIGNATURE'] = signature;
   }
+
   if (body) {
     headers['Content-Type'] = 'application/json';
   }
@@ -52,14 +95,13 @@ async function request(method, path, { params, body, token } = {}) {
 
 // ─── Auth ───────────────────────────────────────────────────────────────────────
 
-export async function login(email, password) {
-  const data = await request('POST', '/login', {
-    body: { email, password },
-  });
-  return { token: data.token, memberId: data.member_id };
-}
+/**
+ * Import an API private key from PEM string and return a CryptoKey.
+ * Call this once when the user enters their key, then reuse the CryptoKey.
+ */
+export { importPrivateKey };
 
-// ─── Markets (public) ───────────────────────────────────────────────────────────
+// ─── Markets (public — no auth needed) ──────────────────────────────────────────
 
 export async function getMarkets({ status = 'open', limit = 200, cursor, seriesTicker, eventTicker } = {}) {
   const data = await request('GET', '/markets', {
@@ -129,19 +171,19 @@ export async function getTrades(ticker, { limit = 100, cursor } = {}) {
   return { trades: data.trades || [], cursor: data.cursor || '' };
 }
 
-// ─── Portfolio (auth required) ──────────────────────────────────────────────────
+// ─── Portfolio (auth required — needs API key) ──────────────────────────────────
 
-export async function getPositions(token) {
-  const data = await request('GET', '/portfolio/positions', { token });
+export async function getPositions(auth) {
+  const data = await request('GET', '/portfolio/positions', { auth });
   return data.market_positions || [];
 }
 
-export async function getBalance(token) {
-  const data = await request('GET', '/portfolio/balance', { token });
+export async function getBalance(auth) {
+  const data = await request('GET', '/portfolio/balance', { auth });
   return data;
 }
 
-export async function placeOrder(token, { ticker, side, type = 'market', count, yesPrice, noPrice }) {
+export async function placeOrder(auth, { ticker, side, type = 'market', count, yesPrice, noPrice }) {
   const body = {
     ticker,
     action: 'buy',
@@ -153,11 +195,11 @@ export async function placeOrder(token, { ticker, side, type = 'market', count, 
     if (side === 'yes') body.yes_price = yesPrice;
     else body.no_price = noPrice;
   }
-  const data = await request('POST', '/portfolio/orders', { token, body });
+  const data = await request('POST', '/portfolio/orders', { auth, body });
   return data.order;
 }
 
-export async function sellPosition(token, { ticker, side, count }) {
+export async function sellPosition(auth, { ticker, side, count }) {
   const body = {
     ticker,
     action: 'sell',
@@ -165,12 +207,12 @@ export async function sellPosition(token, { ticker, side, count }) {
     type: 'market',
     count,
   };
-  const data = await request('POST', '/portfolio/orders', { token, body });
+  const data = await request('POST', '/portfolio/orders', { auth, body });
   return data.order;
 }
 
-export async function cancelOrder(token, orderId) {
-  await request('DELETE', `/portfolio/orders/${orderId}`, { token });
+export async function cancelOrder(auth, orderId) {
+  await request('DELETE', `/portfolio/orders/${orderId}`, { auth });
 }
 
 // ─── Category Detection ─────────────────────────────────────────────────────────
