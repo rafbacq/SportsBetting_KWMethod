@@ -722,7 +722,8 @@ body {
   margin-bottom: 4px;
 }
 
-.settings__field input {
+.settings__field input,
+.settings__field textarea {
   width: 100%;
   padding: 8px 12px;
   font-size: 14px;
@@ -730,10 +731,27 @@ body {
   border-radius: 6px;
   outline: none;
   transition: border-color 0.15s;
+  font-family: inherit;
 }
 
-.settings__field input:focus {
+.settings__field textarea {
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+  font-size: 12px;
+  resize: vertical;
+}
+
+.settings__field input:focus,
+.settings__field textarea:focus {
   border-color: #111;
+}
+
+.settings__info a {
+  color: #2563eb;
+  text-decoration: none;
+}
+
+.settings__info a:hover {
+  text-decoration: underline;
 }
 
 .settings__error {

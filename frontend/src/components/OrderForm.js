@@ -5,23 +5,23 @@ import React, { useState } from 'react';
  *
  * Props:
  *   market      — market object with ticker, yes/no prices
- *   token       — auth token (null if not logged in)
+ *   auth         — { keyId, privateKey } or null if not connected
  *   onPlaceOrder — async (ticker, side, count) => void
  *   onSell       — async (ticker, side, count) => void
  *   position     — user's current position in this market (null if none)
  */
-export default function OrderForm({ market, token, onPlaceOrder, onSell, position }) {
+export default function OrderForm({ market, auth, onPlaceOrder, onSell, position }) {
   const [count, setCount] = useState(1);
   const [side, setSide] = useState('yes');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(null);
 
-  if (!token) {
+  if (!auth) {
     return (
       <div className="order-form">
         <h3>Trade</h3>
-        <p className="order-form__auth-msg">Log in via Settings to place trades.</p>
+        <p className="order-form__auth-msg">Connect your API key via Settings to place trades.</p>
       </div>
     );
   }

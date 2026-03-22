@@ -1,22 +1,22 @@
 import React, { useState } from 'react';
 
 /**
- * Settings panel for Kalshi API credentials.
- * Supports email + password login.
- * Credentials are stored in localStorage for convenience.
+ * Settings panel for Kalshi API key credentials.
+ * Users enter their API Key ID and paste their RSA private key PEM.
+ * API keys are generated at: https://kalshi.com/account/api-keys
  */
-export default function Settings({ token, onLogin, onLogout, balance, loginError }) {
-  const [email, setEmail] = useState(() => localStorage.getItem('kalshi_email') || '');
-  const [password, setPassword] = useState('');
+export default function Settings({ auth, onConnect, onDisconnect, balance, connectError }) {
+  const [keyId, setKeyId] = useState(() => localStorage.getItem('kalshi_key_id') || '');
+  const [privateKeyPem, setPrivateKeyPem] = useState('');
   const [loading, setLoading] = useState(false);
 
-  async function handleLogin(e) {
+  async function handleConnect(e) {
     e.preventDefault();
     setLoading(true);
     try {
-      await onLogin(email, password);
-      localStorage.setItem('kalshi_email', email);
-      setPassword('');
+      await onConnect(keyId, privateKeyPem);
+      localStorage.setItem('kalshi_key_id', keyId);
+      setPrivateKeyPem('');
     } finally {
       setLoading(false);
     }
@@ -24,9 +24,9 @@ export default function Settings({ token, onLogin, onLogout, balance, loginError
 
   return (
     <section className="settings">
-      <h2>Kalshi Account</h2>
+      <h2>Kalshi API Key</h2>
 
-      {token ? (
+      {auth ? (
         <div className="settings__connected">
           <div className="settings__status">
             <span className="status-dot status-dot--connected" />
@@ -40,46 +40,52 @@ export default function Settings({ token, onLogin, onLogout, balance, loginError
             </div>
           )}
 
-          <div className="settings__account-email">{localStorage.getItem('kalshi_email')}</div>
+          <div className="settings__account-email">
+            Key ID: {localStorage.getItem('kalshi_key_id')}
+          </div>
 
-          <button className="btn btn--secondary" onClick={onLogout}>
-            Log Out
+          <button className="btn btn--secondary" onClick={onDisconnect}>
+            Disconnect
           </button>
         </div>
       ) : (
-        <form className="settings__form" onSubmit={handleLogin}>
+        <form className="settings__form" onSubmit={handleConnect}>
           <p className="settings__info">
-            Enter your Kalshi credentials to enable trading. Market data is available without logging in.
+            Enter your Kalshi API key to enable trading. Market browsing works without an API key.
+            Generate API keys at{' '}
+            <a href="https://kalshi.com/account/api-keys" target="_blank" rel="noreferrer">
+              kalshi.com/account/api-keys
+            </a>.
           </p>
 
           <div className="settings__field">
-            <label htmlFor="kalshi-email">Email</label>
+            <label htmlFor="kalshi-key-id">API Key ID</label>
             <input
-              id="kalshi-email"
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="your@email.com"
+              id="kalshi-key-id"
+              type="text"
+              value={keyId}
+              onChange={(e) => setKeyId(e.target.value)}
+              placeholder="e.g. 12345678-abcd-1234-efgh-123456789abc"
               required
             />
           </div>
 
           <div className="settings__field">
-            <label htmlFor="kalshi-password">Password</label>
-            <input
-              id="kalshi-password"
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="Password"
+            <label htmlFor="kalshi-private-key">Private Key (PEM)</label>
+            <textarea
+              id="kalshi-private-key"
+              value={privateKeyPem}
+              onChange={(e) => setPrivateKeyPem(e.target.value)}
+              placeholder={"-----BEGIN PRIVATE KEY-----\nPaste your private key here...\n-----END PRIVATE KEY-----"}
+              rows={6}
               required
             />
           </div>
 
-          {loginError && <div className="settings__error">{loginError}</div>}
+          {connectError && <div className="settings__error">{connectError}</div>}
 
-          <button className="btn btn--primary" type="submit" disabled={loading || !email || !password}>
-            {loading ? 'Connecting...' : 'Log In'}
+          <button className="btn btn--primary" type="submit" disabled={loading || !keyId || !privateKeyPem}>
+            {loading ? 'Connecting...' : 'Connect'}
           </button>
         </form>
       )}

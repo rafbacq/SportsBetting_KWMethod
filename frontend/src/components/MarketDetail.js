@@ -10,7 +10,7 @@ const PERIOD_OPTIONS = [
   { label: '7D', seconds: 604800, interval: 3600 },
 ];
 
-export default function MarketDetail({ market, token, onPlaceOrder, onSell, onClose, position }) {
+export default function MarketDetail({ market, auth, onPlaceOrder, onSell, onClose, position }) {
   const [candles, setCandles] = useState([]);
   const [loading, setLoading] = useState(true);
   const [period, setPeriod] = useState(2); // default 24H
@@ -98,7 +98,7 @@ export default function MarketDetail({ market, token, onPlaceOrder, onSell, onCl
 
       <OrderForm
         market={market}
-        token={token}
+        auth={auth}
         onPlaceOrder={onPlaceOrder}
         onSell={onSell}
         position={position}
