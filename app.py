@@ -150,6 +150,8 @@ if page == "Live Dashboard":
             fig.update_layout(
                 title="Win Probability & Signals",
                 yaxis_title="Probability",
+                yaxis_range=[0, 1],
+                yaxis_tickformat=".0%",
                 height=400,
             )
             st.plotly_chart(fig, use_container_width=True)
