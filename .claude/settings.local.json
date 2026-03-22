@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:trading-api.readme.io)",
+      "WebFetch(domain:docs.kalshi.com)",
+      "WebSearch",
+      "WebFetch(domain:docs.polymarket.com)",
+      "WebFetch(domain:zuplo.com)",
+      "Bash(npm install:*)",
+      "Bash(npx tsc:*)",
+      "Bash(pkill -f \"vite --config packages/client\")",
+      "mcp__Claude_Preview__preview_start",
+      "Bash(curl -s 'https://api.elections.kalshi.com/trade-api/v2/markets?limit=2&status=open')",
+      "Bash(python3 -m json.tool)",
+      "Bash(curl -s 'https://api.elections.kalshi.com/trade-api/v2/events?limit=3&status=open&with_nested_markets=true')"
+    ]
+  }
+}
