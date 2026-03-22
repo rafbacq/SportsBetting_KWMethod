@@ -6,117 +6,130 @@ import MarketDetail from './components/MarketDetail';
 import Settings from './components/Settings';
 import {
   importPrivateKey,
-  getAllOpenMarkets,
+  getAllEvents,
   getBalance,
   placeOrder,
   sellPosition,
-  categorizeMarket,
+  isRealEvent,
+  getSportsSubcategoryFromEvent,
 } from './services/kalshiApi';
 import './App.css';
 
 const TABS = ['Markets', 'Settings'];
-const POLL_INTERVAL = 15000; // 15s market refresh
+const POLL_INTERVAL = 15000;
 
 export default function App() {
-  // ─── Auth state (API key + CryptoKey) ───────────────────────────────
-  const [auth, setAuth] = useState(null); // { keyId, privateKey (CryptoKey) }
+  // ─── Auth ───────────────────────────────────────────────────────────
+  const [auth, setAuth] = useState(null);
   const [balance, setBalance] = useState(null);
   const [connectError, setConnectError] = useState(null);
 
   // ─── Navigation ─────────────────────────────────────────────────────
   const [activeTab, setActiveTab] = useState('Markets');
-  const [selectedMarket, setSelectedMarket] = useState(null);
+  const [selectedEvent, setSelectedEvent] = useState(null);
 
-  // ─── Markets ────────────────────────────────────────────────────────
-  const [markets, setMarkets] = useState([]);
-  const [marketsLoading, setMarketsLoading] = useState(true);
-  const [marketsError, setMarketsError] = useState(null);
+  // ─── Events ─────────────────────────────────────────────────────────
+  const [events, setEvents] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
 
-  // ─── Search & filter ────────────────────────────────────────────────
+  // ─── Filters ────────────────────────────────────────────────────────
   const [search, setSearch] = useState('');
-  const [categoryFilter, setCategoryFilter] = useState('All');
+  const [category, setCategory] = useState('All');
+  const [subcategory, setSubcategory] = useState(null);
 
-  // ─── Fetch markets ──────────────────────────────────────────────────
-
-  const fetchMarkets = useCallback(async () => {
+  // ─── Fetch events ───────────────────────────────────────────────────
+  const fetchEvents = useCallback(async () => {
     try {
-      const data = await getAllOpenMarkets(5);
-      setMarkets(data);
-      setMarketsError(null);
+      const data = await getAllEvents(15);
+      // Filter out MVE combo events
+      const real = data.filter(isRealEvent);
+      setEvents(real);
+      setError(null);
     } catch (e) {
-      console.error('Failed to fetch markets:', e);
-      setMarketsError(e.message);
+      console.error('Failed to fetch events:', e);
+      setError(e.message);
     } finally {
-      setMarketsLoading(false);
+      setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    fetchMarkets();
-    const timer = setInterval(fetchMarkets, POLL_INTERVAL);
+    fetchEvents();
+    const timer = setInterval(fetchEvents, POLL_INTERVAL);
     return () => clearInterval(timer);
-  }, [fetchMarkets]);
+  }, [fetchEvents]);
 
-  // ─── Fetch balance when auth changes ────────────────────────────────
-
+  // ─── Fetch balance ──────────────────────────────────────────────────
   useEffect(() => {
-    if (!auth) {
-      setBalance(null);
-      return;
-    }
-    getBalance(auth)
-      .then((b) => setBalance(b.balance))
-      .catch(() => setBalance(null));
+    if (!auth) { setBalance(null); return; }
+    getBalance(auth).then((b) => setBalance(b.balance)).catch(() => setBalance(null));
   }, [auth]);
 
-  // ─── Categorized + filtered markets ─────────────────────────────────
-
-  const categorizedMarkets = useMemo(
-    () => markets.map((m) => ({ ...m, _category: categorizeMarket(m) })),
-    [markets]
-  );
-
+  // ─── Category counts ───────────────────────────────────────────────
   const categoryCounts = useMemo(() => {
     const counts = {};
-    categorizedMarkets.forEach((m) => {
-      counts[m._category] = (counts[m._category] || 0) + 1;
+    events.forEach((e) => {
+      const cat = e.category || 'Other';
+      counts[cat] = (counts[cat] || 0) + 1;
     });
     return counts;
-  }, [categorizedMarkets]);
+  }, [events]);
 
-  const filteredMarkets = useMemo(() => {
-    let filtered = categorizedMarkets;
+  // ─── Subcategory counts (only for Sports) ──────────────────────────
+  const subcategoryCounts = useMemo(() => {
+    if (category !== 'Sports') return {};
+    const counts = {};
+    events.forEach((e) => {
+      if ((e.category || 'Other') !== 'Sports') return;
+      const sub = getSportsSubcategoryFromEvent(e);
+      counts[sub] = (counts[sub] || 0) + 1;
+    });
+    return counts;
+  }, [events, category]);
 
-    if (categoryFilter !== 'All') {
-      filtered = filtered.filter((m) => m._category === categoryFilter);
+  // ─── Filtered events ───────────────────────────────────────────────
+  const filteredEvents = useMemo(() => {
+    let filtered = events;
+
+    // Category filter
+    if (category !== 'All') {
+      filtered = filtered.filter((e) => (e.category || 'Other') === category);
     }
 
+    // Subcategory filter (Sports only)
+    if (category === 'Sports' && subcategory) {
+      filtered = filtered.filter((e) => getSportsSubcategoryFromEvent(e) === subcategory);
+    }
+
+    // Search
     if (search.trim()) {
       const q = search.toLowerCase();
-      filtered = filtered.filter(
-        (m) =>
-          (m.title || '').toLowerCase().includes(q) ||
-          (m.subtitle || '').toLowerCase().includes(q) ||
-          (m.ticker || '').toLowerCase().includes(q) ||
-          (m.event_ticker || '').toLowerCase().includes(q)
+      filtered = filtered.filter((e) =>
+        (e.title || '').toLowerCase().includes(q) ||
+        (e.sub_title || '').toLowerCase().includes(q) ||
+        (e.event_ticker || '').toLowerCase().includes(q) ||
+        (e.series_ticker || '').toLowerCase().includes(q) ||
+        (e.markets || []).some((m) =>
+          (m.yes_sub_title || '').toLowerCase().includes(q) ||
+          (m.title || '').toLowerCase().includes(q)
+        )
       );
     }
 
     return filtered;
-  }, [categorizedMarkets, categoryFilter, search]);
+  }, [events, category, subcategory, search]);
 
   // ─── Auth handlers ──────────────────────────────────────────────────
-
   async function handleConnect(keyId, privateKeyPem) {
     setConnectError(null);
     try {
       const cryptoKey = await importPrivateKey(privateKeyPem);
       const newAuth = { keyId, privateKey: cryptoKey };
-      // Verify the key works by fetching balance
       await getBalance(newAuth);
       setAuth(newAuth);
     } catch (e) {
-      setConnectError(e.message || 'Failed to connect. Check your API key and private key.');
+      setConnectError(e.message || 'Failed to connect.');
       throw e;
     }
   }
@@ -128,23 +141,17 @@ export default function App() {
   }
 
   // ─── Trading handlers ──────────────────────────────────────────────
-
   async function handlePlaceOrder(ticker, side, count) {
     await placeOrder(auth, { ticker, side, count });
-    if (auth) {
-      getBalance(auth).then((b) => setBalance(b.balance)).catch(() => {});
-    }
+    if (auth) getBalance(auth).then((b) => setBalance(b.balance)).catch(() => {});
   }
 
   async function handleSell(ticker, side, count) {
     await sellPosition(auth, { ticker, side, count });
-    if (auth) {
-      getBalance(auth).then((b) => setBalance(b.balance)).catch(() => {});
-    }
+    if (auth) getBalance(auth).then((b) => setBalance(b.balance)).catch(() => {});
   }
 
   // ─── Render ─────────────────────────────────────────────────────────
-
   return (
     <div className="app">
       <header className="app-header">
@@ -162,10 +169,7 @@ export default function App() {
           <button
             key={tab}
             className={`nav-tab ${activeTab === tab ? 'nav-tab--active' : ''}`}
-            onClick={() => {
-              setActiveTab(tab);
-              if (tab !== 'Markets') setSelectedMarket(null);
-            }}
+            onClick={() => { setActiveTab(tab); setSelectedEvent(null); }}
           >
             {tab}
           </button>
@@ -173,45 +177,50 @@ export default function App() {
       </nav>
 
       <main className="app-main">
-        {activeTab === 'Markets' && !selectedMarket && (
+        {activeTab === 'Markets' && !selectedEvent && (
           <div className="markets-view">
             <div className="markets-view__controls">
               <SearchBar value={search} onChange={setSearch} />
-              <FilterBar active={categoryFilter} onChange={setCategoryFilter} categoryCounts={categoryCounts} />
+              <FilterBar
+                activeCategory={category}
+                activeSubcategory={subcategory}
+                onCategoryChange={setCategory}
+                onSubcategoryChange={setSubcategory}
+                categoryCounts={categoryCounts}
+                subcategoryCounts={subcategoryCounts}
+              />
             </div>
 
             <div className="markets-view__count">
-              {filteredMarkets.length} market{filteredMarkets.length !== 1 ? 's' : ''}
-              {marketsLoading && <span className="loading-dot"> loading...</span>}
+              {filteredEvents.length} event{filteredEvents.length !== 1 ? 's' : ''}
+              {loading && <span className="loading-dot"> loading...</span>}
             </div>
 
-            {marketsError && <div className="markets-error">Error: {marketsError}</div>}
+            {error && <div className="markets-error">Error: {error}</div>}
 
             <div className="market-grid">
-              {filteredMarkets.map((market) => (
+              {filteredEvents.map((event) => (
                 <MarketCard
-                  key={market.ticker}
-                  market={market}
-                  isSelected={false}
-                  onClick={() => setSelectedMarket(market)}
+                  key={event.event_ticker}
+                  event={event}
+                  onClick={() => setSelectedEvent(event)}
                 />
               ))}
             </div>
 
-            {!marketsLoading && filteredMarkets.length === 0 && !marketsError && (
-              <p className="empty-state">No markets found. Try adjusting your search or filters.</p>
+            {!loading && filteredEvents.length === 0 && !error && (
+              <p className="empty-state">No events found. Try adjusting your search or filters.</p>
             )}
           </div>
         )}
 
-        {activeTab === 'Markets' && selectedMarket && (
+        {activeTab === 'Markets' && selectedEvent && (
           <MarketDetail
-            market={selectedMarket}
+            event={selectedEvent}
             auth={auth}
             onPlaceOrder={handlePlaceOrder}
             onSell={handleSell}
-            onClose={() => setSelectedMarket(null)}
-            position={null}
+            onClose={() => setSelectedEvent(null)}
           />
         )}
 

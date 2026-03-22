@@ -1,12 +1,11 @@
 /**
  * Kalshi API Client
  *
- * Handles API key authentication (RSA-PSS signing) and all API interactions.
- * Public endpoints (markets, events, candlesticks) work without auth.
- * Trading endpoints (orders, positions) require API key authentication.
- *
+ * Uses the events API with nested markets for proper titles and categories.
  * All requests go through the CRA dev proxy (setupProxy.js) to avoid CORS.
- * The proxy forwards /trade-api/* to api.elections.kalshi.com/trade-api/*.
+ *
+ * Public endpoints (events, markets, candlesticks) work without auth.
+ * Trading endpoints (orders, positions) require API key authentication.
  */
 
 const API_PREFIX = '/trade-api/v2';
@@ -14,18 +13,43 @@ const API_PREFIX = '/trade-api/v2';
 // ─── RSA-PSS Signing (Web Crypto API) ───────────────────────────────────────────
 
 async function importPrivateKey(pemString) {
-  const pemBody = pemString
-    .replace(/-----BEGIN (?:RSA )?PRIVATE KEY-----/, '')
-    .replace(/-----END (?:RSA )?PRIVATE KEY-----/, '')
-    .replace(/\s/g, '');
-  const binaryDer = Uint8Array.from(atob(pemBody), (c) => c.charCodeAt(0));
-  return crypto.subtle.importKey(
-    'pkcs8',
-    binaryDer.buffer,
-    { name: 'RSA-PSS', hash: 'SHA-256' },
-    false,
-    ['sign']
-  );
+  const pem = pemString.trim();
+
+  // Try PKCS8 first, then PKCS1
+  const formats = [
+    { name: 'pkcs8', header: '-----BEGIN PRIVATE KEY-----', footer: '-----END PRIVATE KEY-----' },
+    { name: 'pkcs8', header: '-----BEGIN RSA PRIVATE KEY-----', footer: '-----END RSA PRIVATE KEY-----' },
+  ];
+
+  let binaryDer;
+  for (const fmt of formats) {
+    if (pem.includes(fmt.header) || formats.indexOf(fmt) === formats.length - 1) {
+      const pemBody = pem
+        .replace(/-----BEGIN [\w\s]+-----/, '')
+        .replace(/-----END [\w\s]+-----/, '')
+        .replace(/\s/g, '');
+      binaryDer = Uint8Array.from(atob(pemBody), (c) => c.charCodeAt(0));
+      break;
+    }
+  }
+
+  if (!binaryDer) throw new Error('Could not parse private key PEM');
+
+  try {
+    return await crypto.subtle.importKey(
+      'pkcs8',
+      binaryDer.buffer,
+      { name: 'RSA-PSS', hash: 'SHA-256' },
+      false,
+      ['sign']
+    );
+  } catch (e) {
+    throw new Error(
+      'Failed to import private key. Ensure you paste the full PEM including ' +
+      '"-----BEGIN PRIVATE KEY-----" and "-----END PRIVATE KEY-----" lines. ' +
+      'Original error: ' + e.message
+    );
+  }
 }
 
 async function signRequest(privateKey, timestampMs, method, path) {
@@ -38,7 +62,9 @@ async function signRequest(privateKey, timestampMs, method, path) {
   return btoa(String.fromCharCode(...new Uint8Array(signature)));
 }
 
-// ─── Helpers ────────────────────────────────────────────────────────────────────
+export { importPrivateKey };
+
+// ─── HTTP Helpers ───────────────────────────────────────────────────────────────
 
 function buildUrl(path, params = {}) {
   const url = new URL(`${API_PREFIX}${path}`, window.location.origin);
@@ -50,22 +76,13 @@ function buildUrl(path, params = {}) {
   return url.toString();
 }
 
-/**
- * Make an API request.
- * @param {string} method - HTTP method
- * @param {string} path - API path (e.g., /markets)
- * @param {object} options
- * @param {object} options.params - Query params
- * @param {object} options.body - JSON body
- * @param {object} options.auth - { keyId, privateKey (CryptoKey) } for signed requests
- */
 async function request(method, path, { params, body, auth } = {}) {
   const url = buildUrl(path, params);
   const headers = { Accept: 'application/json' };
 
   if (auth && auth.keyId && auth.privateKey) {
     const timestampMs = String(Date.now());
-    const sigPath = `${API_PREFIX}${path}`; // sign the path without query params
+    const sigPath = `${API_PREFIX}${path}`;
     const signature = await signRequest(auth.privateKey, timestampMs, method.toUpperCase(), sigPath);
     headers['KALSHI-ACCESS-KEY'] = auth.keyId;
     headers['KALSHI-ACCESS-TIMESTAMP'] = timestampMs;
@@ -93,57 +110,41 @@ async function request(method, path, { params, body, auth } = {}) {
   return res.json();
 }
 
-// ─── Auth ───────────────────────────────────────────────────────────────────────
+// ─── Events (public — the primary way to browse markets) ────────────────────────
 
-/**
- * Import an API private key from PEM string and return a CryptoKey.
- * Call this once when the user enters their key, then reuse the CryptoKey.
- */
-export { importPrivateKey };
-
-// ─── Markets (public — no auth needed) ──────────────────────────────────────────
-
-export async function getMarkets({ status = 'open', limit = 200, cursor, seriesTicker, eventTicker } = {}) {
-  const data = await request('GET', '/markets', {
+export async function getEvents({ limit = 200, cursor, seriesTicker, withNestedMarkets = true } = {}) {
+  const data = await request('GET', '/events', {
     params: {
-      status,
       limit,
       cursor,
       series_ticker: seriesTicker,
-      event_ticker: eventTicker,
+      with_nested_markets: withNestedMarkets,
     },
   });
-  return { markets: data.markets || [], cursor: data.cursor || '' };
+  return { events: data.events || [], cursor: data.cursor || '' };
 }
 
-export async function getAllOpenMarkets(maxPages = 10) {
-  const allMarkets = [];
+export async function getAllEvents(maxPages = 15) {
+  const allEvents = [];
   let cursor = '';
   for (let page = 0; page < maxPages; page++) {
-    const { markets, cursor: next } = await getMarkets({
-      status: 'open',
-      limit: 1000,
+    const { events, cursor: next } = await getEvents({
+      limit: 200,
       cursor: cursor || undefined,
+      withNestedMarkets: true,
     });
-    allMarkets.push(...markets);
-    if (!next || markets.length === 0) break;
+    allEvents.push(...events);
+    if (!next || events.length === 0) break;
     cursor = next;
   }
-  return allMarkets;
+  return allEvents;
 }
+
+// ─── Markets (public) ───────────────────────────────────────────────────────────
 
 export async function getMarket(ticker) {
   const data = await request('GET', `/markets/${ticker}`);
   return data.market;
-}
-
-// ─── Events (public) ────────────────────────────────────────────────────────────
-
-export async function getEvents({ status = 'open', limit = 200, cursor, seriesTicker } = {}) {
-  const data = await request('GET', '/events', {
-    params: { status, limit, cursor, series_ticker: seriesTicker },
-  });
-  return { events: data.events || [], cursor: data.cursor || '' };
 }
 
 // ─── Candlesticks (public) ──────────────────────────────────────────────────────
@@ -162,99 +163,102 @@ export async function getCandlesticks(ticker, { startTs, endTs, periodInterval =
   return entry ? entry.candlesticks || [] : [];
 }
 
-// ─── Trades (public) ────────────────────────────────────────────────────────────
-
-export async function getTrades(ticker, { limit = 100, cursor } = {}) {
-  const data = await request('GET', '/markets/trades', {
-    params: { ticker, limit, cursor },
-  });
-  return { trades: data.trades || [], cursor: data.cursor || '' };
-}
-
-// ─── Portfolio (auth required — needs API key) ──────────────────────────────────
-
-export async function getPositions(auth) {
-  const data = await request('GET', '/portfolio/positions', { auth });
-  return data.market_positions || [];
-}
+// ─── Portfolio (auth required) ──────────────────────────────────────────────────
 
 export async function getBalance(auth) {
   const data = await request('GET', '/portfolio/balance', { auth });
   return data;
 }
 
-export async function placeOrder(auth, { ticker, side, type = 'market', count, yesPrice, noPrice }) {
-  const body = {
-    ticker,
-    action: 'buy',
-    side,
-    type,
-    count,
-  };
-  if (type === 'limit') {
-    if (side === 'yes') body.yes_price = yesPrice;
-    else body.no_price = noPrice;
-  }
+export async function placeOrder(auth, { ticker, side, type = 'market', count }) {
+  const body = { ticker, action: 'buy', side, type, count };
   const data = await request('POST', '/portfolio/orders', { auth, body });
   return data.order;
 }
 
 export async function sellPosition(auth, { ticker, side, count }) {
-  const body = {
-    ticker,
-    action: 'sell',
-    side,
-    type: 'market',
-    count,
-  };
+  const body = { ticker, action: 'sell', side, type: 'market', count };
   const data = await request('POST', '/portfolio/orders', { auth, body });
   return data.order;
 }
 
-export async function cancelOrder(auth, orderId) {
-  await request('DELETE', `/portfolio/orders/${orderId}`, { auth });
+// ─── Subcategory Detection ──────────────────────────────────────────────────────
+
+const SPORTS_SUBCATEGORIES = [
+  { sub: 'Basketball', prefixes: ['KXNBA', 'KXNCAAMB', 'KXNCAAWB', 'KXWNBA'] },
+  { sub: 'Football', prefixes: ['KXNFL', 'KXNCAAF', 'KXSUPERBOWL', 'KXUSFL', 'KXUFL'] },
+  { sub: 'Baseball', prefixes: ['KXMLB'] },
+  { sub: 'Hockey', prefixes: ['KXNHL'] },
+  { sub: 'Soccer', prefixes: ['KXLALIGA', 'KXEPL', 'KXMLS', 'KXCHAMPIONS', 'KXLIGA', 'KXSERIE', 'KXLIGUE', 'KXBUNDES', 'KXUEFA', 'KXFIFA', 'KXWORLDCUP'] },
+  { sub: 'Golf', prefixes: ['KXGOLF', 'KXPGA', 'KXMASTERS'] },
+  { sub: 'Tennis', prefixes: ['KXTENNIS', 'KXATP', 'KXWTA'] },
+  { sub: 'MMA/Boxing', prefixes: ['KXMMA', 'KXUFC', 'KXBOXING'] },
+  { sub: 'Racing', prefixes: ['KXF1', 'KXNASCAR', 'KXINDY'] },
+  { sub: 'Other Sports', prefixes: [] },
+];
+
+export function getSportsSubcategory(seriesTicker) {
+  const upper = (seriesTicker || '').toUpperCase();
+  for (const { sub, prefixes } of SPORTS_SUBCATEGORIES) {
+    if (prefixes.some((p) => upper.startsWith(p))) return sub;
+  }
+  // Also check title keywords as fallback
+  return 'Other Sports';
 }
 
-// ─── Category Detection ─────────────────────────────────────────────────────────
+export function getSportsSubcategoryFromEvent(event) {
+  const sub = getSportsSubcategory(event.series_ticker);
+  if (sub !== 'Other Sports') return sub;
 
-const CATEGORY_PATTERNS = [
-  { category: 'Sports', patterns: ['kxnba', 'kxncaa', 'kxnfl', 'kxmlb', 'kxnhl', 'kxmma', 'kxsoccer', 'kxtennis', 'kxgolf', 'kxf1'] },
-  { category: 'Politics', patterns: ['kxpolitics', 'kxelection', 'kxtrump', 'kxbiden', 'kxpotus', 'kxsenate', 'kxhouse', 'kxgov', 'kxpolicy'] },
-  { category: 'Economics', patterns: ['kxgdp', 'kxcpi', 'kxjobs', 'kxfed', 'kxinflation', 'kxunemployment', 'kxecon'] },
-  { category: 'Crypto', patterns: ['kxbtc', 'kxeth', 'kxcrypto', 'kxbitcoin', 'kxethereum', 'kxsol'] },
-  { category: 'Finance', patterns: ['kxspy', 'kxstocks', 'kxnasdaq', 'kxsp500', 'kxdow', 'kxrates', 'kxfinance'] },
-  { category: 'Weather', patterns: ['kxweather', 'kxtemp', 'kxhurricane', 'kxclimate'] },
-  { category: 'Culture', patterns: ['kxoscars', 'kxemmy', 'kxmovie', 'kxtv', 'kxmusic', 'kxawards', 'kxentertainment'] },
-  { category: 'Tech', patterns: ['kxtech', 'kxai', 'kxapple', 'kxgoogle', 'kxmeta', 'kxtesla'] },
-];
+  // Check product_metadata.competition
+  const comp = ((event.product_metadata || {}).competition || '').toLowerCase();
+  if (comp.includes('basketball')) return 'Basketball';
+  if (comp.includes('football')) return 'Football';
+  if (comp.includes('baseball')) return 'Baseball';
+  if (comp.includes('hockey')) return 'Hockey';
+  if (comp.includes('soccer') || comp.includes('football') || comp.includes('liga')) return 'Soccer';
 
-const TITLE_CATEGORY_MAP = [
-  { category: 'Sports', keywords: ['nba', 'ncaa', 'nfl', 'mlb', 'nhl', 'basketball', 'football', 'baseball', 'hockey', 'soccer', 'tennis', 'golf', 'mma', 'ufc', 'boxing', 'f1', 'nascar', 'march madness'] },
-  { category: 'Politics', keywords: ['president', 'election', 'senate', 'congress', 'governor', 'democrat', 'republican', 'trump', 'biden', 'vote', 'ballot', 'political', 'policy'] },
-  { category: 'Economics', keywords: ['gdp', 'inflation', 'cpi', 'unemployment', 'jobs report', 'fed ', 'federal reserve', 'interest rate', 'payroll'] },
-  { category: 'Crypto', keywords: ['bitcoin', 'ethereum', 'btc', 'eth', 'crypto', 'solana'] },
-  { category: 'Finance', keywords: ['s&p', 'nasdaq', 'dow jones', 'stock', 'treasury', 'bond yield'] },
-  { category: 'Weather', keywords: ['temperature', 'hurricane', 'tornado', 'rainfall', 'snowfall', 'weather'] },
-  { category: 'Culture', keywords: ['oscar', 'emmy', 'grammy', 'movie', 'box office', 'streaming', 'tv show', 'album'] },
-  { category: 'Tech', keywords: ['ai ', 'artificial intelligence', 'apple', 'google', 'spacex', 'launch'] },
-];
+  // Check title
+  const title = (event.title || '').toLowerCase();
+  if (title.includes('basketball') || title.includes('nba') || title.includes('ncaa')) return 'Basketball';
+  if (title.includes('football') || title.includes('nfl')) return 'Football';
+  if (title.includes('hockey') || title.includes('nhl') || title.includes('stanley')) return 'Hockey';
+  if (title.includes('soccer') || title.includes('liga') || title.includes('premier league')) return 'Soccer';
 
-export function categorizeMarket(market) {
-  const eventTicker = (market.event_ticker || '').toLowerCase();
-  const seriesTicker = (market.series_ticker || '').toLowerCase();
-  const tickerBlob = eventTicker + ' ' + seriesTicker;
+  return 'Other Sports';
+}
 
-  for (const { category, patterns } of CATEGORY_PATTERNS) {
-    if (patterns.some((p) => tickerBlob.includes(p))) return category;
-  }
+// ─── Event Helpers ──────────────────────────────────────────────────────────────
 
-  const title = (market.title || '').toLowerCase();
-  const subtitle = (market.subtitle || market.yes_sub_title || '').toLowerCase();
-  const textBlob = title + ' ' + subtitle;
+/** Filter out MVE combo/parlay events that have junk titles */
+export function isRealEvent(event) {
+  const ticker = (event.event_ticker || '').toUpperCase();
+  if (ticker.includes('KXMVE')) return false;
+  if (ticker.includes('MULTIGAME')) return false;
+  return true;
+}
 
-  for (const { category, keywords } of TITLE_CATEGORY_MAP) {
-    if (keywords.some((kw) => textBlob.includes(kw))) return category;
-  }
+/** Get the best market from an event (highest volume or first) */
+export function getPrimaryMarket(event) {
+  const markets = event.markets || [];
+  if (markets.length === 0) return null;
+  // Sort by volume descending and return highest
+  return [...markets].sort((a, b) =>
+    parseFloat(b.volume_fp || 0) - parseFloat(a.volume_fp || 0)
+  )[0];
+}
 
-  return 'Other';
+/** Format cents from dollar string */
+export function formatCents(dollarStr) {
+  if (!dollarStr) return '—';
+  const cents = Math.round(parseFloat(dollarStr) * 100);
+  return `${cents}¢`;
+}
+
+/** Format volume number */
+export function formatVolume(vol) {
+  const n = parseFloat(vol || 0);
+  if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`;
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}K`;
+  return String(Math.round(n));
 }
