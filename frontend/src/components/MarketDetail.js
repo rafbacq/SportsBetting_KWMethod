@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import PriceChart from './PriceChart';
 import OrderForm from './OrderForm';
-import { getCandlesticks } from '../services/kalshiApi';
+import { getCandlesticks, formatCents, formatVolume } from '../services/kalshiApi';
 
 const PERIOD_OPTIONS = [
   { label: '1H', seconds: 3600, interval: 60 },
@@ -10,17 +10,27 @@ const PERIOD_OPTIONS = [
   { label: '7D', seconds: 604800, interval: 3600 },
 ];
 
-export default function MarketDetail({ market, auth, onPlaceOrder, onSell, onClose, position }) {
+/**
+ * Detailed view of a Kalshi event.
+ * Shows all market outcomes with selectable charts and order placement.
+ */
+export default function MarketDetail({ event, auth, onPlaceOrder, onSell, onClose }) {
+  const markets = event.markets || [];
+  const [selectedTicker, setSelectedTicker] = useState(
+    markets.length > 0 ? markets[0].ticker : null
+  );
   const [candles, setCandles] = useState([]);
   const [loading, setLoading] = useState(true);
   const [period, setPeriod] = useState(2); // default 24H
 
+  const selectedMarket = markets.find((m) => m.ticker === selectedTicker) || markets[0];
+
   const fetchCandles = useCallback(async () => {
-    if (!market) return;
+    if (!selectedTicker) return;
     const opt = PERIOD_OPTIONS[period];
     const now = Math.floor(Date.now() / 1000);
     try {
-      const data = await getCandlesticks(market.ticker, {
+      const data = await getCandlesticks(selectedTicker, {
         startTs: now - opt.seconds,
         endTs: now,
         periodInterval: opt.interval,
@@ -31,7 +41,7 @@ export default function MarketDetail({ market, auth, onPlaceOrder, onSell, onClo
     } finally {
       setLoading(false);
     }
-  }, [market, period]);
+  }, [selectedTicker, period]);
 
   useEffect(() => {
     setLoading(true);
@@ -40,53 +50,98 @@ export default function MarketDetail({ market, auth, onPlaceOrder, onSell, onClo
     return () => clearInterval(timer);
   }, [fetchCandles]);
 
-  if (!market) return null;
+  if (!event) return null;
 
-  const lastPrice = parseFloat(market.last_price_dollars || 0);
-  const volume = parseFloat(market.volume_fp || 0);
-  const openInterest = parseFloat(market.open_interest_fp || 0);
+  const totalVolume = markets.reduce((s, m) => s + parseFloat(m.volume_fp || 0), 0);
 
   return (
     <div className="market-detail">
       <div className="market-detail__header">
         <button className="market-detail__back" onClick={onClose}>&larr; Back</button>
-        <h2 className="market-detail__title">{market.title}</h2>
+        <div>
+          <h2 className="market-detail__title">{event.title}</h2>
+          {event.sub_title && (
+            <span className="market-detail__subtitle">{event.sub_title}</span>
+          )}
+        </div>
       </div>
 
-      {market.rules_primary && (
-        <p className="market-detail__rules">{market.rules_primary}</p>
+      {selectedMarket && selectedMarket.rules_primary && (
+        <p className="market-detail__rules">{selectedMarket.rules_primary}</p>
       )}
 
-      <div className="market-detail__stats">
-        <div className="detail-stat">
-          <span className="detail-stat__value">{(lastPrice * 100).toFixed(0)}¢</span>
-          <span className="detail-stat__label">Last Price</span>
-        </div>
-        <div className="detail-stat">
-          <span className="detail-stat__value">{volume.toLocaleString()}</span>
-          <span className="detail-stat__label">Volume</span>
-        </div>
-        <div className="detail-stat">
-          <span className="detail-stat__value">{openInterest.toLocaleString()}</span>
-          <span className="detail-stat__label">Open Interest</span>
-        </div>
-        <div className="detail-stat">
-          <span className="detail-stat__value">{(lastPrice * 100).toFixed(0)}%</span>
-          <span className="detail-stat__label">Implied Prob</span>
-        </div>
+      {/* Market outcomes table */}
+      <div className="market-detail__outcomes">
+        <table className="outcomes-table">
+          <thead>
+            <tr>
+              <th>Outcome</th>
+              <th>Yes Bid</th>
+              <th>Yes Ask</th>
+              <th>Last</th>
+              <th>Volume</th>
+            </tr>
+          </thead>
+          <tbody>
+            {markets.map((m) => {
+              const isSelected = m.ticker === selectedTicker;
+              return (
+                <tr
+                  key={m.ticker}
+                  className={`outcomes-table__row ${isSelected ? 'outcomes-table__row--selected' : ''}`}
+                  onClick={() => setSelectedTicker(m.ticker)}
+                >
+                  <td className="outcomes-table__label">{m.yes_sub_title || m.title}</td>
+                  <td className="outcomes-table__yes">{formatCents(m.yes_bid_dollars)}</td>
+                  <td>{formatCents(m.yes_ask_dollars)}</td>
+                  <td>{formatCents(m.last_price_dollars)}</td>
+                  <td>{formatVolume(m.volume_fp)}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
       </div>
 
+      {/* Stats for selected market */}
+      {selectedMarket && (
+        <div className="market-detail__stats">
+          <div className="detail-stat">
+            <span className="detail-stat__value">{formatCents(selectedMarket.last_price_dollars)}</span>
+            <span className="detail-stat__label">Last Price</span>
+          </div>
+          <div className="detail-stat">
+            <span className="detail-stat__value">{formatVolume(selectedMarket.volume_fp)}</span>
+            <span className="detail-stat__label">Volume</span>
+          </div>
+          <div className="detail-stat">
+            <span className="detail-stat__value">{formatVolume(selectedMarket.open_interest_fp)}</span>
+            <span className="detail-stat__label">Open Interest</span>
+          </div>
+          <div className="detail-stat">
+            <span className="detail-stat__value">{totalVolume > 0 ? formatVolume(totalVolume) : '0'}</span>
+            <span className="detail-stat__label">Event Volume</span>
+          </div>
+        </div>
+      )}
+
+      {/* Chart */}
       <div className="market-detail__chart-section">
-        <div className="period-selector">
-          {PERIOD_OPTIONS.map((opt, i) => (
-            <button
-              key={opt.label}
-              className={`period-btn ${period === i ? 'period-btn--active' : ''}`}
-              onClick={() => setPeriod(i)}
-            >
-              {opt.label}
-            </button>
-          ))}
+        <div className="market-detail__chart-header">
+          <span className="market-detail__chart-title">
+            {selectedMarket ? (selectedMarket.yes_sub_title || selectedMarket.title) : 'Select outcome'}
+          </span>
+          <div className="period-selector">
+            {PERIOD_OPTIONS.map((opt, i) => (
+              <button
+                key={opt.label}
+                className={`period-btn ${period === i ? 'period-btn--active' : ''}`}
+                onClick={() => setPeriod(i)}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
         </div>
 
         {loading ? (
@@ -96,13 +151,16 @@ export default function MarketDetail({ market, auth, onPlaceOrder, onSell, onClo
         )}
       </div>
 
-      <OrderForm
-        market={market}
-        auth={auth}
-        onPlaceOrder={onPlaceOrder}
-        onSell={onSell}
-        position={position}
-      />
+      {/* Order form */}
+      {selectedMarket && (
+        <OrderForm
+          market={selectedMarket}
+          auth={auth}
+          onPlaceOrder={onPlaceOrder}
+          onSell={onSell}
+          position={null}
+        />
+      )}
     </div>
   );
 }

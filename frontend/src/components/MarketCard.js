@@ -1,48 +1,58 @@
 import React from 'react';
+import { formatCents, formatVolume } from '../services/kalshiApi';
 
-function formatPrice(dollars) {
-  if (!dollars) return '—';
-  const cents = Math.round(parseFloat(dollars) * 100);
-  return `${cents}¢`;
+/**
+ * Displays a Kalshi event with its nested market outcomes.
+ * Shows event title, subtitle, category badge, and outcome prices.
+ */
+export default function MarketCard({ event, onClick }) {
+  const markets = event.markets || [];
+  const totalVolume = markets.reduce((s, m) => s + parseFloat(m.volume_fp || 0), 0);
+
+  return (
+    <div className="market-card" onClick={onClick}>
+      <div className="market-card__header">
+        <span className="market-card__category">{event.category}</span>
+        {totalVolume > 0 && (
+          <span className="market-card__volume">Vol {formatVolume(totalVolume)}</span>
+        )}
+      </div>
+
+      <div className="market-card__title">{event.title}</div>
+      {event.sub_title && <div className="market-card__subtitle">{event.sub_title}</div>}
+
+      <div className="market-card__outcomes">
+        {markets.slice(0, 4).map((m) => (
+          <MarketOutcome key={m.ticker} market={m} />
+        ))}
+        {markets.length > 4 && (
+          <div className="market-card__more">+{markets.length - 4} more</div>
+        )}
+      </div>
+    </div>
+  );
 }
 
-function formatVolume(vol) {
-  const n = parseFloat(vol || 0);
-  if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`;
-  if (n >= 1000) return `${(n / 1000).toFixed(1)}K`;
-  return String(Math.round(n));
-}
-
-export default function MarketCard({ market, isSelected, onClick }) {
-  const yesPrice = formatPrice(market.yes_bid_dollars || market.last_price_dollars);
-  const noPrice = formatPrice(market.no_bid_dollars);
-  const volume = formatVolume(market.volume_fp);
+function MarketOutcome({ market }) {
+  const label = market.yes_sub_title || market.title || market.ticker;
+  const yesBid = formatCents(market.yes_bid_dollars);
+  const yesAsk = formatCents(market.yes_ask_dollars);
   const lastPrice = parseFloat(market.last_price_dollars || 0);
   const prevPrice = parseFloat(market.previous_price_dollars || lastPrice);
   const diff = lastPrice - prevPrice;
+  const vol = parseFloat(market.volume_fp || 0);
 
   return (
-    <div className={`market-card ${isSelected ? 'market-card--selected' : ''}`} onClick={onClick}>
-      <div className="market-card__title">{market.title}</div>
-      {market.subtitle && <div className="market-card__subtitle">{market.subtitle}</div>}
-
-      <div className="market-card__prices">
-        <div className="market-card__price market-card__price--yes">
-          <span className="price-label">Yes</span>
-          <span className="price-value">{yesPrice}</span>
-        </div>
-        <div className="market-card__price market-card__price--no">
-          <span className="price-label">No</span>
-          <span className="price-value">{noPrice}</span>
-        </div>
-        <div className="market-card__meta">
-          {diff !== 0 && (
-            <span className={`price-change ${diff > 0 ? 'price-change--up' : 'price-change--down'}`}>
-              {diff > 0 ? '+' : ''}{(diff * 100).toFixed(0)}¢
-            </span>
-          )}
-          <span className="volume-label">Vol {volume}</span>
-        </div>
+    <div className="outcome">
+      <span className="outcome__label">{label}</span>
+      <div className="outcome__prices">
+        <span className="outcome__price">{yesBid}</span>
+        {diff !== 0 && (
+          <span className={`outcome__change ${diff > 0 ? 'outcome__change--up' : 'outcome__change--down'}`}>
+            {diff > 0 ? '+' : ''}{(diff * 100).toFixed(0)}¢
+          </span>
+        )}
+        {vol > 0 && <span className="outcome__vol">{formatVolume(vol)}</span>}
       </div>
     </div>
   );
