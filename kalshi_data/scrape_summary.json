@@ -1,0 +1,10 @@
+{
+  "scrape_time": "2026-03-22T03:30:47.074103+00:00",
+  "total_markets": 5481,
+  "nba_markets": 2324,
+  "ncaa_markets": 3157,
+  "candlestick_rows": 19578,
+  "trade_tick_rows": 347153,
+  "api_requests_made": 5587,
+  "unique_series_tickers": []
+}
