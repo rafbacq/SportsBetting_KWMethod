@@ -53,7 +53,12 @@ export class KalshiAdapter implements PlatformAdapter {
   }
 
   async getMarkets(params: Omit<GetMarketsParams, 'platform'>): Promise<PaginatedResult<Market>> {
-    // Use events endpoint to get richer market data with titles and categories
+    // Kalshi doesn't support text search on events API - use markets endpoint for search
+    if (params.search) {
+      return this.searchMarkets(params);
+    }
+
+    // Use events endpoint for browsing (richer data with titles and categories)
     const queryParams: Record<string, string> = {
       with_nested_markets: 'true',
     };
@@ -76,7 +81,6 @@ export class KalshiAdapter implements PlatformAdapter {
     for (const event of res.events || []) {
       for (const m of event.markets || []) {
         const mapped = mapKalshiMarket(m);
-        // Use event title if market title is missing or generic
         if (!mapped.title || mapped.title === 'undefined') {
           mapped.title = event.title;
         }
@@ -94,35 +98,70 @@ export class KalshiAdapter implements PlatformAdapter {
     };
   }
 
+  private async searchMarkets(params: Omit<GetMarketsParams, 'platform'>): Promise<PaginatedResult<Market>> {
+    const queryParams: Record<string, string> = {};
+    if (params.search) queryParams.ticker = params.search;
+    if (params.status) queryParams.status = params.status;
+    if (params.cursor) queryParams.cursor = params.cursor;
+    if (params.limit) queryParams.limit = params.limit.toString();
+
+    const res = await this.client.get<{
+      markets: Array<Record<string, unknown>>;
+      cursor?: string;
+    }>('/markets', queryParams);
+
+    const markets = (res.markets || []).map((m) => mapKalshiMarket(m));
+
+    return {
+      data: markets,
+      cursor: res.cursor,
+      hasMore: !!res.cursor,
+    };
+  }
+
   async getMarket(id: string): Promise<Market> {
     const res = await this.client.get<{ market: Record<string, unknown> }>(`/markets/${id}`);
     return mapKalshiMarket(res.market);
   }
 
   async getOrderbook(marketId: string): Promise<Orderbook> {
-    const res = await this.client.get<{ orderbook: Record<string, unknown> }>(
+    const res = await this.client.get<Record<string, unknown>>(
       `/markets/${marketId}/orderbook`,
     );
-    return mapKalshiOrderbook(res.orderbook as never, marketId);
+    return mapKalshiOrderbook(res, marketId);
   }
 
   async getMarketHistory(marketId: string): Promise<MarketHistory> {
-    // Kalshi provides candlestick data via /series endpoint
+    // Kalshi uses /series/{series}/markets/{ticker}/candlesticks
     try {
+      // First get the market to find its series_ticker
+      const market = await this.getMarket(marketId);
+      const seriesTicker = market.eventTicker || marketId;
+
+      const now = Math.floor(Date.now() / 1000);
+      const oneDayAgo = now - 86400;
+
       const res = await this.client.get<{
-        history: Array<{ ts: number; yes_price: number; volume: number }>;
-      }>(`/markets/${marketId}/history`, { min_ts: '0' });
+        candlesticks: Array<{
+          end_period_ts: number;
+          yes_price: { open: string; close: string; high: string; low: string };
+          volume: number;
+        }>;
+      }>(`/series/${seriesTicker}/markets/${marketId}/candlesticks`, {
+        start_ts: oneDayAgo.toString(),
+        end_ts: now.toString(),
+        period_interval: '60', // 1 minute intervals
+      });
 
       return {
         marketId,
-        points: (res.history || []).map((p) => ({
-          timestamp: new Date(p.ts * 1000).toISOString(),
-          yesPrice: p.yes_price,
-          volume: p.volume || 0,
+        points: (res.candlesticks || []).map((c) => ({
+          timestamp: new Date(c.end_period_ts * 1000).toISOString(),
+          yesPrice: Math.round(parseFloat(c.yes_price?.close || '0.5') * 100),
+          volume: c.volume || 0,
         })),
       };
     } catch {
-      // Return empty history if endpoint not available
       return { marketId, points: [] };
     }
   }
@@ -130,16 +169,21 @@ export class KalshiAdapter implements PlatformAdapter {
   async placeOrder(params: Omit<PlaceOrderParams, 'platform'>): Promise<Order> {
     if (!this.authenticated) throw new Error('Not authenticated with Kalshi');
 
-    const body = {
+    // Kalshi uses dollar prices (e.g. 0.55 for 55 cents)
+    const dollarPrice = params.price / 100;
+    const priceKey = params.side === 'yes' ? 'yes_price_dollars' : 'no_price_dollars';
+
+    const body: Record<string, unknown> = {
       ticker: params.marketTicker,
       action: params.action,
       side: params.side,
       type: params.type,
       count: params.quantity,
-      ...(params.type === 'limit'
-        ? { [params.side === 'yes' ? 'yes_price' : 'no_price']: params.price }
-        : {}),
     };
+
+    if (params.type === 'limit') {
+      body[priceKey] = dollarPrice.toFixed(2);
+    }
 
     const res = await this.client.post<{ order: Record<string, unknown> }>(
       '/portfolio/orders',

@@ -27,21 +27,27 @@ interface PolymarketMarket {
   clobTokenIds?: string; // JSON string "[\"tokenId1\", \"tokenId2\"]"
 }
 
-export function mapPolymarketMarket(m: PolymarketMarket): Market {
+export function mapPolymarketMarket(m: Partial<PolymarketMarket>): Market {
   let yesPrice = 50;
   let noPrice = 50;
   try {
-    const prices = JSON.parse(m.outcomePrices);
-    yesPrice = Math.round(parseFloat(prices[0]) * 100);
-    noPrice = Math.round(parseFloat(prices[1]) * 100);
+    if (m.outcomePrices) {
+      const prices = JSON.parse(m.outcomePrices);
+      if (Array.isArray(prices) && prices.length >= 2) {
+        yesPrice = Math.round(parseFloat(prices[0]) * 100) || 50;
+        noPrice = Math.round(parseFloat(prices[1]) * 100) || 50;
+      }
+    }
   } catch {
     // use defaults
   }
 
+  const id = m.condition_id || m.id || '';
+
   return {
-    id: m.condition_id || m.id,
+    id,
     platform: 'polymarket',
-    ticker: m.condition_id || m.id,
+    ticker: id,
     title: m.question || m.groupItemTitle || '',
     description: m.description || '',
     status: m.closed ? 'closed' : m.active ? 'open' : 'closed',
@@ -49,9 +55,9 @@ export function mapPolymarketMarket(m: PolymarketMarket): Market {
     noPrice,
     volume: m.volume || 0,
     category: undefined,
-    createdAt: m.startDate,
-    closesAt: m.endDate,
-    imageUrl: m.image,
+    createdAt: m.startDate || new Date().toISOString(),
+    closesAt: m.endDate || new Date().toISOString(),
+    imageUrl: m.image || undefined,
   };
 }
 
@@ -84,21 +90,28 @@ export function mapPolymarketOrderbook(
 }
 
 export function mapPolymarketOrder(o: Record<string, unknown>): Order {
+  const id = String(o.id || '');
+  const marketId = String(o.asset_id || o.market || '');
+  const price = Math.round(parseFloat(String(o.price || '0')) * 100) || 0;
+  const quantity = parseInt(String(o.original_size || '0'), 10) || 0;
+  const filledQuantity = parseInt(String(o.size_matched || '0'), 10) || 0;
+  const now = new Date().toISOString();
+
   return {
-    id: o.id as string,
+    id,
     platform: 'polymarket',
-    marketId: (o.asset_id || o.market) as string,
-    marketTicker: (o.asset_id || o.market) as string,
+    marketId,
+    marketTicker: marketId,
     side: o.side === 'BUY' ? 'yes' : 'no',
     action: o.side === 'BUY' ? 'buy' : 'sell',
     type: 'limit',
-    price: Math.round(parseFloat(o.price as string) * 100),
-    quantity: parseInt(o.original_size as string, 10),
-    filledQuantity: parseInt(o.size_matched as string, 10) || 0,
-    remainingQuantity: parseInt(o.original_size as string, 10) - (parseInt(o.size_matched as string, 10) || 0),
+    price,
+    quantity,
+    filledQuantity,
+    remainingQuantity: quantity - filledQuantity,
     status: 'open',
-    createdAt: o.created_at as string || new Date().toISOString(),
-    updatedAt: o.created_at as string || new Date().toISOString(),
+    createdAt: String(o.created_at || now),
+    updatedAt: String(o.created_at || now),
   };
 }
 

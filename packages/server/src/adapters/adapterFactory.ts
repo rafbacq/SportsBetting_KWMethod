@@ -2,6 +2,7 @@ import type { Platform } from '@sports-betting/shared';
 import type { PlatformAdapter } from './types.js';
 import { KalshiAdapter } from './kalshi/index.js';
 import { PolymarketAdapter } from './polymarket/index.js';
+import { loadAllCredentials } from '../config/credentialStore.js';
 
 class AdapterFactory {
   private adapters = new Map<Platform, PlatformAdapter>();
@@ -25,6 +26,21 @@ class AdapterFactory {
 
   getAll(): PlatformAdapter[] {
     return Array.from(this.adapters.values());
+  }
+
+  async restoreCredentials(): Promise<void> {
+    const saved = loadAllCredentials();
+    for (const creds of saved) {
+      try {
+        const adapter = this.adapters.get(creds.platform);
+        if (adapter && !adapter.isAuthenticated()) {
+          await adapter.initialize(creds);
+          console.log(`[Auth] Restored credentials for ${creds.platform}`);
+        }
+      } catch (err) {
+        console.warn(`[Auth] Failed to restore credentials for ${creds.platform}:`, err);
+      }
+    }
   }
 }
 

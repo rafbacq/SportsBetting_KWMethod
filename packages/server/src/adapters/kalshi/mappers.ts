@@ -21,9 +21,9 @@ interface KalshiMarket {
   image_url?: string;
 }
 
-interface KalshiOrderbook {
-  yes: Array<[number, number]>;
-  no: Array<[number, number]>;
+interface KalshiOrderbookFP {
+  yes_dollars: Array<[string, string]>; // [price_string, qty_string]
+  no_dollars: Array<[string, string]>;  // [price_string, qty_string]
 }
 
 interface KalshiOrder {
@@ -34,6 +34,8 @@ interface KalshiOrder {
   type: string;
   yes_price: number;
   no_price: number;
+  yes_price_dollars?: string;
+  no_price_dollars?: string;
   created_time: string;
   updated_time?: string;
   status: string;
@@ -95,14 +97,20 @@ export function mapKalshiMarket(m: Record<string, unknown>): Market {
   };
 }
 
-export function mapKalshiOrderbook(data: KalshiOrderbook, marketId: string): Orderbook {
-  const mapLevels = (levels: Array<[number, number]>): OrderbookLevel[] =>
-    levels.map(([price, quantity]) => ({ price, quantity }));
+export function mapKalshiOrderbook(data: Record<string, unknown>, marketId: string): Orderbook {
+  // Kalshi uses orderbook_fp format with yes_dollars/no_dollars as [price_string, qty_string] arrays
+  const ob = (data.orderbook_fp || data) as KalshiOrderbookFP;
+
+  const mapLevels = (levels: Array<[string, string]> | undefined): OrderbookLevel[] =>
+    (levels || []).map(([priceStr, qtyStr]) => ({
+      price: Math.round(parseFloat(priceStr) * 100), // dollar string to cents
+      quantity: Math.round(parseFloat(qtyStr)),
+    }));
 
   return {
     marketId,
-    yes: mapLevels(data.yes || []),
-    no: mapLevels(data.no || []),
+    yes: mapLevels(ob.yes_dollars),
+    no: mapLevels(ob.no_dollars),
     timestamp: new Date().toISOString(),
   };
 }
@@ -124,7 +132,9 @@ export function mapKalshiOrder(o: KalshiOrder): Order {
     side: o.side === 'yes' ? 'yes' : 'no',
     action: o.action === 'buy' ? 'buy' : 'sell',
     type: o.type === 'market' ? 'market' : 'limit',
-    price: o.yes_price || o.no_price,
+    price: o.yes_price_dollars || o.no_price_dollars
+      ? Math.round(parseFloat(o.yes_price_dollars || o.no_price_dollars || '0') * 100)
+      : (o.yes_price || o.no_price),
     quantity: o.initial_count,
     filledQuantity: o.initial_count - o.remaining_count,
     remainingQuantity: o.remaining_count,
@@ -157,12 +167,20 @@ export function mapKalshiPosition(p: KalshiPosition, market?: Market): Position 
   };
 }
 
-export function mapKalshiBalance(data: { balance: number; portfolio_value?: number }): Balance {
-  const available = data.balance / 100; // Kalshi returns cents
+export function mapKalshiBalance(data: Record<string, unknown>): Balance {
+  // Kalshi now uses dollar strings (e.g. "125.50") instead of cents
+  const parseDollarBalance = (val: unknown): number => {
+    const n = parseFloat(String(val || '0'));
+    return isNaN(n) ? 0 : n;
+  };
+
+  const available = parseDollarBalance(data.balance_dollars || data.balance);
+  const portfolioValue = parseDollarBalance(data.portfolio_value_dollars || data.portfolio_value);
+
   return {
     platform: 'kalshi',
     available,
     outstanding: 0,
-    total: data.portfolio_value ? data.portfolio_value / 100 : available,
+    total: portfolioValue || available,
   };
 }

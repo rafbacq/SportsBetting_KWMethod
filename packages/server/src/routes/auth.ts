@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import type { Platform, PlatformCredentials } from '@sports-betting/shared';
 import { adapterFactory } from '../adapters/adapterFactory.js';
+import { saveCredentials, clearCredentials } from '../config/credentialStore.js';
 
 const router = Router();
 
@@ -10,6 +11,7 @@ router.post('/connect', async (req, res, next) => {
     const credentials: PlatformCredentials = req.body;
     const adapter = adapterFactory.get(credentials.platform);
     await adapter.initialize(credentials);
+    saveCredentials(credentials);
     res.json({ success: true, platform: credentials.platform });
   } catch (err) {
     next(err);

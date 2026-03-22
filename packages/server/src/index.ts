@@ -3,6 +3,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import { config } from './config/env.js';
 import { errorHandler } from './middleware/errorHandler.js';
+import { adapterFactory } from './adapters/adapterFactory.js';
 import marketsRouter from './routes/markets.js';
 import ordersRouter from './routes/orders.js';
 import positionsRouter from './routes/positions.js';
@@ -31,6 +32,7 @@ app.get('/api/health', (_req, res) => {
 // Error handler
 app.use(errorHandler);
 
-app.listen(config.port, () => {
+app.listen(config.port, async () => {
   console.log(`Server running on http://localhost:${config.port}`);
+  await adapterFactory.restoreCredentials();
 });
