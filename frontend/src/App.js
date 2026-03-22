@@ -42,7 +42,7 @@ export default function App() {
   // ─── Fetch events (sports only) ───────────────────────────────────
   const fetchEvents = useCallback(async () => {
     try {
-      const data = await getAllEvents(15);
+      const data = await getAllEvents(40);
       // Filter: real events + sports only + actual live matches (not long-term predictions)
       const sportsOnly = data.filter(e => isRealEvent(e) && isSportsEvent(e) && isLiveMatch(e));
       setEvents(sportsOnly);

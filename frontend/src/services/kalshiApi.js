@@ -178,6 +178,7 @@ export async function getAllEvents(maxPages = 15) {
       limit: 200,
       cursor: cursor || undefined,
       withNestedMarkets: true,
+      status: 'open',
     });
     allEvents.push(...events);
     if (!next || events.length === 0) break;
@@ -312,8 +313,14 @@ export async function getBalance(auth) {
   return data;
 }
 
-export async function placeOrder(auth, { ticker, side, type = 'market', count }) {
-  const body = { ticker, action: 'buy', side, type, count: parseInt(count, 10) };
+export async function placeOrder(auth, { ticker, side, type = 'limit', count, priceCents }) {
+  const body = { 
+    ticker, action: 'buy', side, type, count: parseInt(count, 10),
+    client_order_id: crypto.randomUUID()
+  };
+  if (side === 'yes') body.yes_price = parseInt(priceCents, 10);
+  else body.no_price = parseInt(priceCents, 10);
+
   try {
     const data = await request('POST', '/portfolio/orders', { auth, body });
     return data.order;
@@ -336,8 +343,14 @@ export async function placeOrder(auth, { ticker, side, type = 'market', count })
   }
 }
 
-export async function sellPosition(auth, { ticker, side, count }) {
-  const body = { ticker, action: 'sell', side, type: 'market', count: parseInt(count, 10) };
+export async function sellPosition(auth, { ticker, side, count, priceCents }) {
+  const body = { 
+    ticker, action: 'sell', side, type: 'limit', count: parseInt(count, 10),
+    client_order_id: crypto.randomUUID()
+  };
+  if (side === 'yes') body.yes_price = parseInt(priceCents, 10);
+  else body.no_price = parseInt(priceCents, 10);
+
   try {
     const data = await request('POST', '/portfolio/orders', { auth, body });
     return data.order;
@@ -451,28 +464,47 @@ export function isLiveMatch(event) {
     /by \d{4}/,               // "by 2030"
     /in \d{4}/,               // "in 2030"
     /\d{4} season/,           // "2031 season"
-    /\d{4}\?$/,              // ends with a year and ?
+    /\d{4}\?$/,               // ends with a year and ?
     /will .+ ever/i,          // "Will X ever ..."
+    /^will /,                 // Starts with "Will "
+    /^who /,                  // Starts with "Who "
+    /^how /,                  // Starts with "How "
+    /^when /,                 // Starts with "When "
     /bought and changed/,     // ownership bets
     /new team/,               // expansion bets
     /majority owner/,         // ownership bets
-    /head coach/,             // coaching hire bets
+    /coach/,                  // coaching hire bets
     /relocat/,                // relocation bets
     /expansion/,              // expansion bets
     /retire/,                 // retirement bets
     /hall of fame/,           // HoF bets
+    /roster/,                 // Roster changes
+    /play together/,          // Player movement
+    /draft /,                 // Draft bets
+    /\bmvp\b/,                // MVP awards
+    /\bheisman\b/,            // Heisman trophy
+    /peace prize/,            // Non-sports awards
+    /relegation/,             // Season futures
+    /golden boot/,            // Season awards
+    /\bpick\b/,               // Draft pick futures
+    /best record/,            // Season record futures
+    /win a.+title/            // Title futures
   ];
   if (longTermPatterns.some(p => p.test(blob))) return false;
 
-  // Check if any market closes within the next 14 days
+  // Filter STRICTLY for actual match/game keywords to drop economics/prop features.
+  const matchKeywords = [' vs ', ' vs. ', 'championship', 'tournament', 'grand slam', 'open', 'classic', 'matchup', 'fight', 'challenger', 'cup', 'masters', 'finals', 'super bowl', 'winner', 'champion'];
+  if (!matchKeywords.some(kw => blob.includes(kw))) return false;
+
+  // Check if any market closes within the next 90 days
   const now = Date.now();
-  const fourteenDays = 14 * 24 * 60 * 60 * 1000;
+  const ninetyDays = 90 * 24 * 60 * 60 * 1000;
   const hasNearExpiry = markets.some(m => {
     const closeTime = m.close_time || m.expiration_time || m.expected_expiration_time;
     if (!closeTime) return false;
     try {
       const closeMs = new Date(closeTime).getTime();
-      return closeMs > now && closeMs < now + fourteenDays;
+      return closeMs > now && closeMs < now + ninetyDays;
     } catch (_) {
       return false;
     }

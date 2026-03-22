@@ -22,7 +22,7 @@ export default function MultiLineChart({ datasets = [], width = 700, height = 28
     );
   }
 
-  const pad = { top: 16, right: 16, bottom: 28, left: 48 };
+  const pad = { top: 16, right: 0, bottom: 0, left: 0 };
   const plotW = width - pad.left - pad.right;
   const plotH = height - pad.top - pad.bottom;
 
@@ -55,40 +55,11 @@ export default function MultiLineChart({ datasets = [], width = 700, height = 28
   const toX = (t) => pad.left + ((t - minT) / rangeT) * plotW;
   const toY = (p) => pad.top + (1 - (p - minP) / rangeP) * plotH;
 
-  // Y-axis ticks: 0%, 25%, 50%, 75%, 100%
-  const yTicks = [0, 0.25, 0.5, 0.75, 1.0];
+  // No axes or grid lines are rendered in this Kalshi clone
 
-  // X-axis ticks: 4 evenly spaced
-  const xTicks = [0, 1, 2, 3].map(i => {
-    const t = minT + (rangeT * i) / 3;
-    const d = new Date(t * 1000);
-    const hours = d.getHours();
-    const mins = String(d.getMinutes()).padStart(2, '0');
-    const ampm = hours >= 12 ? 'PM' : 'AM';
-    const h12 = hours % 12 || 12;
-    return { t, label: `${h12}:${mins} ${ampm}` };
-  });
-
-  // Grid lines
-  const gridLines = yTicks.map(p => ({
-    y: toY(p),
-    label: `${Math.round(p * 100)}%`,
-  }));
 
   return (
     <svg className="price-chart" width={width} height={height} viewBox={`0 0 ${width} ${height}`}>
-      {/* Background grid — horizontal */}
-      {gridLines.map((g, i) => (
-        <g key={i}>
-          <line
-            x1={pad.left} y1={g.y} x2={width - pad.right} y2={g.y}
-            stroke="#2a2a2a" strokeWidth="1" strokeDasharray="3,3"
-          />
-          <text x={pad.left - 8} y={g.y + 4} textAnchor="end" fontSize="11" fill="#666" fontFamily="Inter, sans-serif">
-            {g.label}
-          </text>
-        </g>
-      ))}
 
       {/* Render each dataset as a line */}
       {datasets.map((dataset, di) => {
@@ -106,12 +77,16 @@ export default function MultiLineChart({ datasets = [], width = 700, height = 28
           y: toY(Math.max(0, Math.min(1, p))),
         }));
 
-        const linePath = `M${points.map(pt => `${pt.x},${pt.y}`).join('L')}`;
+        let linePath = `M${points[0].x},${points[0].y}`;
+        for (let i = 1; i < points.length; i++) {
+          linePath += ` L${points[i].x},${points[i - 1].y} L${points[i].x},${points[i].y}`;
+        }
+        
         const lastPt = points[points.length - 1];
 
         // Area fill for first dataset only
         const areaPath = di === 0
-          ? `${linePath}L${lastPt.x},${toY(0)}L${points[0].x},${toY(0)}Z`
+          ? `${linePath} L${lastPt.x},${toY(0)}L${points[0].x},${toY(0)}Z`
           : null;
 
         const gradId = `grad-${di}`;
@@ -136,25 +111,17 @@ export default function MultiLineChart({ datasets = [], width = 700, height = 28
               d={linePath}
               fill="none"
               stroke={color}
-              strokeWidth={di === 0 ? 2.5 : 2}
+              strokeWidth="2.5"
               strokeLinejoin="round"
               strokeLinecap="round"
-              opacity={di === 0 ? 1 : 0.8}
             />
 
             {/* Current price dot */}
-            <circle cx={lastPt.x} cy={lastPt.y} r="4" fill={color} />
-            <circle cx={lastPt.x} cy={lastPt.y} r="7" fill={color} opacity="0.2" />
+            <circle cx={lastPt.x} cy={lastPt.y} r="5" fill={color} />
           </g>
         );
       })}
 
-      {/* X-axis labels */}
-      {xTicks.map(({ t, label }, i) => (
-        <text key={i} x={toX(t)} y={height - 6} textAnchor="middle" fontSize="10" fill="#666" fontFamily="Inter, sans-serif">
-          {label}
-        </text>
-      ))}
     </svg>
   );
 }

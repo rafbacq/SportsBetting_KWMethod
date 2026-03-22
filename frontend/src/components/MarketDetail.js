@@ -55,10 +55,12 @@ export default function MarketDetail({ event, auth, onPlaceOrder, onSell, onClos
   });
 
   const fetchCandles = useCallback(async () => {
-    if (markets.length === 0) return;
+    // Only fetch for top 5 to prevent URL length limits (e.g. 140 golf markets)
+    const topMarkets = sortedMarkets.slice(0, 5);
+    if (topMarkets.length === 0) return;
     const opt = PERIOD_OPTIONS[period];
     try {
-      const data = await getEventCandlesticks(markets, opt.seconds, opt.interval);
+      const data = await getEventCandlesticks(topMarkets, opt.seconds, opt.interval);
       setCandleData(data);
     } catch (e) {
       console.error('Failed to fetch candlesticks:', e);

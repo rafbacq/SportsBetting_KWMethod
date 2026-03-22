@@ -37,7 +37,8 @@ export default function OrderForm({ market, auth, onPlaceOrder, onSell, position
     setError(null);
     setSuccess(null);
     try {
-      await onPlaceOrder(market.ticker, side, parseInt(count, 10));
+      const priceCents = side === 'yes' ? Math.round(yesPrice * 100) : Math.round(noPrice * 100);
+      await onPlaceOrder(market.ticker, side, parseInt(count, 10), priceCents);
       setSuccess(`Bought ${count} ${side.toUpperCase()} @ ${side === 'yes' ? (yesPrice * 100).toFixed(0) : (noPrice * 100).toFixed(0)}¢`);
     } catch (e) {
       setError(e.message);
@@ -51,7 +52,8 @@ export default function OrderForm({ market, auth, onPlaceOrder, onSell, position
     setError(null);
     setSuccess(null);
     try {
-      await onSell(market.ticker, side, parseInt(count, 10));
+      const priceCents = side === 'yes' ? Math.round(yesPrice * 100) : Math.round(noPrice * 100);
+      await onSell(market.ticker, side, parseInt(count, 10), priceCents);
       setSuccess(`Sold ${count} ${side.toUpperCase()} contracts`);
     } catch (e) {
       setError(e.message);
