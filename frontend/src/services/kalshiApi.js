@@ -10,44 +10,89 @@
 
 const API_PREFIX = '/trade-api/v2';
 
-// ─── RSA-PSS Signing (Web Crypto API) ───────────────────────────────────────────
+// ─── RSA Key Handling ────────────────────────────────────────────────────────────
+
+/**
+ * DER-encode a tag + content (ASN.1 TLV).
+ * Handles lengths up to 3 bytes (supports keys up to ~16MB).
+ */
+function derWrap(tag, content) {
+  const len = content.length;
+  let header;
+  if (len < 128) {
+    header = new Uint8Array([tag, len]);
+  } else if (len < 256) {
+    header = new Uint8Array([tag, 0x81, len]);
+  } else if (len < 65536) {
+    header = new Uint8Array([tag, 0x82, (len >> 8) & 0xff, len & 0xff]);
+  } else {
+    header = new Uint8Array([tag, 0x83, (len >> 16) & 0xff, (len >> 8) & 0xff, len & 0xff]);
+  }
+  const result = new Uint8Array(header.length + content.length);
+  result.set(header);
+  result.set(content, header.length);
+  return result;
+}
+
+/**
+ * Convert PKCS#1 (BEGIN RSA PRIVATE KEY) to PKCS#8 (BEGIN PRIVATE KEY).
+ * Web Crypto API only accepts PKCS#8 format.
+ */
+function pkcs1ToPkcs8(pkcs1Der) {
+  // PKCS#8 structure:
+  //   SEQUENCE {
+  //     INTEGER 0,
+  //     SEQUENCE { OID 1.2.840.113549.1.1.1 (rsaEncryption), NULL },
+  //     OCTET STRING { <PKCS#1 key bytes> }
+  //   }
+  const version = new Uint8Array([0x02, 0x01, 0x00]);
+  const rsaOid = new Uint8Array([
+    0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01,
+    0x05, 0x00,
+  ]);
+  const algorithmId = derWrap(0x30, rsaOid);
+  const octetString = derWrap(0x04, pkcs1Der);
+
+  const inner = new Uint8Array(version.length + algorithmId.length + octetString.length);
+  inner.set(version, 0);
+  inner.set(algorithmId, version.length);
+  inner.set(octetString, version.length + algorithmId.length);
+
+  return derWrap(0x30, inner);
+}
 
 async function importPrivateKey(pemString) {
   const pem = pemString.trim();
+  const isPkcs1 = pem.includes('BEGIN RSA PRIVATE KEY');
 
-  // Try PKCS8 first, then PKCS1
-  const formats = [
-    { name: 'pkcs8', header: '-----BEGIN PRIVATE KEY-----', footer: '-----END PRIVATE KEY-----' },
-    { name: 'pkcs8', header: '-----BEGIN RSA PRIVATE KEY-----', footer: '-----END RSA PRIVATE KEY-----' },
-  ];
+  // Strip PEM headers/footers and whitespace to get raw base64
+  const pemBody = pem
+    .replace(/-----BEGIN [\w\s]+-----/g, '')
+    .replace(/-----END [\w\s]+-----/g, '')
+    .replace(/\s/g, '');
 
-  let binaryDer;
-  for (const fmt of formats) {
-    if (pem.includes(fmt.header) || formats.indexOf(fmt) === formats.length - 1) {
-      const pemBody = pem
-        .replace(/-----BEGIN [\w\s]+-----/, '')
-        .replace(/-----END [\w\s]+-----/, '')
-        .replace(/\s/g, '');
-      binaryDer = Uint8Array.from(atob(pemBody), (c) => c.charCodeAt(0));
-      break;
-    }
+  if (!pemBody) throw new Error('Private key PEM is empty.');
+
+  let pkcs8Der;
+  try {
+    const rawDer = Uint8Array.from(atob(pemBody), (c) => c.charCodeAt(0));
+    pkcs8Der = isPkcs1 ? pkcs1ToPkcs8(rawDer) : rawDer;
+  } catch (e) {
+    throw new Error('Failed to decode private key base64: ' + e.message);
   }
-
-  if (!binaryDer) throw new Error('Could not parse private key PEM');
 
   try {
     return await crypto.subtle.importKey(
       'pkcs8',
-      binaryDer.buffer,
+      pkcs8Der.buffer,
       { name: 'RSA-PSS', hash: 'SHA-256' },
       false,
       ['sign']
     );
   } catch (e) {
     throw new Error(
-      'Failed to import private key. Ensure you paste the full PEM including ' +
-      '"-----BEGIN PRIVATE KEY-----" and "-----END PRIVATE KEY-----" lines. ' +
-      'Original error: ' + e.message
+      'Failed to import private key. Ensure you paste the full PEM file contents ' +
+      'including the BEGIN/END lines. Error: ' + e.message
     );
   }
 }
@@ -161,6 +206,41 @@ export async function getCandlesticks(ticker, { startTs, endTs, periodInterval =
   });
   const entry = (data.markets || []).find((m) => m.market_ticker === ticker);
   return entry ? entry.candlesticks || [] : [];
+}
+
+/**
+ * Fetch candlesticks with automatic fallback to longer time windows.
+ * Tries the requested period first, then progressively wider windows.
+ */
+export async function getCandlesticksWithFallback(ticker, seconds, interval) {
+  const now = Math.floor(Date.now() / 1000);
+
+  // Try the requested window first
+  let candles = await getCandlesticks(ticker, {
+    startTs: now - seconds,
+    endTs: now,
+    periodInterval: interval,
+  });
+  if (candles.length >= 2) return candles;
+
+  // Fallback: try progressively larger windows
+  const fallbacks = [
+    { seconds: 7 * 86400, interval: 3600 },      // 7 days, 1h intervals
+    { seconds: 30 * 86400, interval: 14400 },     // 30 days, 4h intervals
+    { seconds: 90 * 86400, interval: 86400 },     // 90 days, daily intervals
+  ];
+
+  for (const fb of fallbacks) {
+    if (fb.seconds <= seconds) continue; // skip if smaller than what we already tried
+    candles = await getCandlesticks(ticker, {
+      startTs: now - fb.seconds,
+      endTs: now,
+      periodInterval: fb.interval,
+    });
+    if (candles.length >= 2) return candles;
+  }
+
+  return candles;
 }
 
 // ─── Portfolio (auth required) ──────────────────────────────────────────────────

@@ -130,7 +130,6 @@ export default function App() {
       setAuth(newAuth);
     } catch (e) {
       setConnectError(e.message || 'Failed to connect.');
-      throw e;
     }
   }
 
