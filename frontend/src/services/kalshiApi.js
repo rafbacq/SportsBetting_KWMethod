@@ -318,8 +318,9 @@ export async function placeOrder(auth, { ticker, side, type = 'limit', count, pr
     ticker, action: 'buy', side, type, count: parseInt(count, 10),
     client_order_id: crypto.randomUUID()
   };
-  if (side === 'yes') body.yes_price = parseInt(priceCents, 10);
-  else body.no_price = parseInt(priceCents, 10);
+  const priceDollars = (parseInt(priceCents, 10) / 100).toFixed(4);
+  if (side === 'yes') body.yes_price_dollars = priceDollars;
+  else body.no_price_dollars = priceDollars;
 
   try {
     const data = await request('POST', '/portfolio/orders', { auth, body });
@@ -348,8 +349,9 @@ export async function sellPosition(auth, { ticker, side, count, priceCents }) {
     ticker, action: 'sell', side, type: 'limit', count: parseInt(count, 10),
     client_order_id: crypto.randomUUID()
   };
-  if (side === 'yes') body.yes_price = parseInt(priceCents, 10);
-  else body.no_price = parseInt(priceCents, 10);
+  const priceDollars = (parseInt(priceCents, 10) / 100).toFixed(4);
+  if (side === 'yes') body.yes_price_dollars = priceDollars;
+  else body.no_price_dollars = priceDollars;
 
   try {
     const data = await request('POST', '/portfolio/orders', { auth, body });

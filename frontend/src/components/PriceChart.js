@@ -52,18 +52,61 @@ export default function MultiLineChart({ datasets = [], width = 700, height = 28
   const maxP = 1;
   const rangeP = 1;
 
-  const toX = (t) => pad.left + ((t - minT) / rangeT) * plotW;
-  const toY = (p) => pad.top + (1 - (p - minP) / rangeP) * plotH;
+  // Add right padding for labels, bottom for time axis, left for percent labels
+  const rightPad = 120;
+  const bottomPad = 24;
+  const leftPad = 40;
+  const topPad = 16;
+  
+  const toX = (t) => leftPad + ((t - minT) / rangeT) * plotW;
+  const toY = (p) => topPad + (1 - (p - minP) / rangeP) * plotH;
 
-  // No axes or grid lines are rendered in this Kalshi clone
+  // Generate X-axis labels (time)
+  const xLabels = [];
+  if (rangeT > 0) {
+    const formatTime = (ts) => {
+      const d = new Date(ts * 1000);
+      let h = d.getHours();
+      const m = d.getMinutes().toString().padStart(2, '0');
+      const ampm = h >= 12 ? 'pm' : 'am';
+      h = h % 12 || 12;
+      return `${h}:${m}${ampm}`;
+    };
+    
+    // Create ~5 evenly spaced time labels
+    const numLabels = 5;
+    for (let i = 0; i < numLabels; i++) {
+      const ts = minT + (rangeT * i) / (numLabels - 1);
+      xLabels.push({ x: toX(ts), label: formatTime(ts) });
+    }
+  }
+
+  // Generate Y-axis labels (percentage values)
+  const yLabels = [0, 0.2, 0.4, 0.6, 0.8].map(p => ({
+    y: toY(p), 
+    label: `${Math.round(p * 100)}%`
+  }));
 
 
   return (
     <svg className="price-chart" width={width} height={height} viewBox={`0 0 ${width} ${height}`}>
 
+      {/* Horizontal Grid Lines */}
+      {yLabels.map((yl, i) => (
+        <g key={`grid-y-${i}`}>
+          <line
+            x1={leftPad} y1={yl.y}
+            x2={width - rightPad} y2={yl.y}
+            stroke="#222"
+            strokeDasharray="4,4"
+            strokeWidth="1"
+          />
+        </g>
+      ))}
+
       {/* Render each dataset as a line */}
       {datasets.map((dataset, di) => {
-        const { candles = [], color } = dataset;
+        const { candles = [], color, label } = dataset;
         if (candles.length < 2) return null;
 
         const prices = candles.map(c => {
@@ -77,12 +120,17 @@ export default function MultiLineChart({ datasets = [], width = 700, height = 28
           y: toY(Math.max(0, Math.min(1, p))),
         }));
 
+        // Kalshi step line: horizontal then vertical (L x[i], y[i-1] L x[i], y[i])
+        // Wait, the prompt says change from step-line to smooth curves, but Kalshi's screenshot IS a step-line.
+        // Looking at the second screenshot (LIV Golf), it is a jagged line, but *direct* point-to-point (standard line chart), NOT a step-line.
+        // Let's use direct point-to-point.
         let linePath = `M${points[0].x},${points[0].y}`;
         for (let i = 1; i < points.length; i++) {
-          linePath += ` L${points[i].x},${points[i - 1].y} L${points[i].x},${points[i].y}`;
+          linePath += ` L${points[i].x},${points[i].y}`;
         }
         
         const lastPt = points[points.length - 1];
+        const lastPrice = prices[prices.length - 1];
 
         // Area fill for first dataset only
         const areaPath = di === 0
@@ -90,6 +138,10 @@ export default function MultiLineChart({ datasets = [], width = 700, height = 28
           : null;
 
         const gradId = `grad-${di}`;
+
+        // Ensure label doesn't crash into other labels by adjusting Y slightly if needed 
+        // (A simple approach without full collision detection)
+        const textY = lastPt.y;
 
         return (
           <g key={di}>
@@ -117,10 +169,71 @@ export default function MultiLineChart({ datasets = [], width = 700, height = 28
             />
 
             {/* Current price dot */}
-            <circle cx={lastPt.x} cy={lastPt.y} r="5" fill={color} />
+            <circle cx={lastPt.x} cy={lastPt.y} r="4" fill={color} />
           </g>
         );
       })}
+
+      {/* Render text labels at the end of the line (after all lines so they are on top) */}
+      {datasets.map((dataset, di) => {
+        const { candles = [], color, label } = dataset;
+        if (candles.length < 2) return null;
+
+        const prices = candles.map(c => {
+          const p = c.price || c;
+          return parseFloat(p.close_dollars || p.mean_dollars || p.close || 0);
+        });
+        const times = candles.map(c => c.end_period_ts || 0);
+        
+        const lastPrice = prices[prices.length - 1];
+        const lastPt = {
+            x: toX(times[times.length - 1]),
+            y: toY(Math.max(0, Math.min(1, lastPrice)))
+        };
+
+        return (
+            <text
+              key={`label-${di}`}
+              x={lastPt.x + 8}
+              y={lastPt.y - 4}
+              fill={color}
+              fontSize="12px"
+              fontWeight="500"
+              fontFamily="sans-serif"
+            >
+              <tspan x={lastPt.x + 8} dy="0">{label.split(' ')[0]}</tspan>
+              <tspan x={lastPt.x + 8} dy="16" fontSize="16px" fontWeight="700">{Math.round(lastPrice * 100)}%</tspan>
+            </text>
+        );
+      })}
+
+      {/* Axis Labels (rendered last to stay on top) */}
+      {yLabels.map((yl, i) => (
+        <text
+          key={`y-axis-${i}`}
+          x={width - rightPad + 8}
+          y={yl.y + 4} // vertical center adjustment
+          fill="#666"
+          fontSize="11px"
+          fontFamily="sans-serif"
+        >
+          {yl.label}
+        </text>
+      ))}
+
+      {xLabels.map((xl, i) => (
+        <text
+          key={`x-axis-${i}`}
+          x={xl.x}
+          y={height - 5}
+          fill="#666"
+          fontSize="11px"
+          fontFamily="sans-serif"
+          textAnchor={i === 0 ? 'start' : i === xLabels.length - 1 ? 'end' : 'middle'}
+        >
+          {xl.label}
+        </text>
+      ))}
 
     </svg>
   );

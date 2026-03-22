@@ -124,13 +124,13 @@ export default function App() {
   }
 
   // ─── Trading handlers ──────────────────────────────────────────────
-  async function handlePlaceOrder(ticker, side, count) {
-    await placeOrder(auth, { ticker, side, count: parseInt(count, 10) });
+  async function handlePlaceOrder(ticker, side, count, priceCents) {
+    await placeOrder(auth, { ticker, side, count: parseInt(count, 10), priceCents });
     if (auth) getBalance(auth).then((b) => setBalance(b.balance)).catch(() => {});
   }
 
-  async function handleSell(ticker, side, count) {
-    await sellPosition(auth, { ticker, side, count: parseInt(count, 10) });
+  async function handleSell(ticker, side, count, priceCents) {
+    await sellPosition(auth, { ticker, side, count: parseInt(count, 10), priceCents });
     if (auth) getBalance(auth).then((b) => setBalance(b.balance)).catch(() => {});
   }
 
