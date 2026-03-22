@@ -17,6 +17,8 @@ export default function Settings({ auth, onConnect, onDisconnect, balance, conne
       await onConnect(keyId, privateKeyPem);
       localStorage.setItem('kalshi_key_id', keyId);
       setPrivateKeyPem('');
+    } catch {
+      // Error is displayed via connectError prop from parent
     } finally {
       setLoading(false);
     }

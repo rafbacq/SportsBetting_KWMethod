@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import PriceChart from './PriceChart';
 import OrderForm from './OrderForm';
-import { getCandlesticks, formatCents, formatVolume } from '../services/kalshiApi';
+import { getCandlesticksWithFallback, formatCents, formatVolume } from '../services/kalshiApi';
 
 const PERIOD_OPTIONS = [
   { label: '1H', seconds: 3600, interval: 60 },
@@ -30,11 +30,7 @@ export default function MarketDetail({ event, auth, onPlaceOrder, onSell, onClos
     const opt = PERIOD_OPTIONS[period];
     const now = Math.floor(Date.now() / 1000);
     try {
-      const data = await getCandlesticks(selectedTicker, {
-        startTs: now - opt.seconds,
-        endTs: now,
-        periodInterval: opt.interval,
-      });
+      const data = await getCandlesticksWithFallback(selectedTicker, opt.seconds, opt.interval);
       setCandles(data);
     } catch (e) {
       console.error('Failed to fetch candlesticks:', e);
