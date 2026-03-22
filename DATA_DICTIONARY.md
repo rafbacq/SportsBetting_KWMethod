@@ -6,13 +6,13 @@
 pip install requests pandas
 
 # Full scrape: ~10k markets + hourly candles + ticks
-python kalshi_scraper_v2.py
+python3 kalshi_scraper_v2.py
 
 # Fast mode: markets only, no candle/tick data
-python kalshi_scraper_v2.py --skip-candles --skip-ticks
+python3 kalshi_scraper_v2.py --skip-candles --skip-ticks
 
 # Fine-grained: 5k markets, 1-minute candles, 500 ticks each
-python kalshi_scraper_v2.py -m 5000 --candle-interval 1 --max-ticks 500
+python3 kalshi_scraper_v2.py -m 5000 --candle-interval 1 --max-ticks 500
 ```
 
 ---
@@ -55,6 +55,8 @@ One row per settled market. This is your primary dataset.
 | `league` | str | `NBA` or `NCAA` |
 | `title` | str | Full market description |
 | `result` | str | Raw result: `yes`, `no`, `all_no` |
+| `label_kind` | str | `binary`, `scalar`, `unresolved`, or `other` |
+| `label_usable` | bool | `True` only when the market resolved to a clean YES/NO label |
 | **`result_binary`** | **int** | **1 = YES won, 0 = NO won** |
 | **`implied_prob_close`** | **float** | **Market's closing probability for YES (0–1)** |
 | **`odds_multiplier_yes`** | **float** | **Payout multiplier if you buy YES = 1/price** |
@@ -187,3 +189,41 @@ small = trades[trades['count'] < trades['count'].quantile(0.5)]
 | `-m 1000 --max-ticks 50` | 1,000 | ~1,030 | ~8min |
 
 The tick phase dominates runtime (1 API call per market). Adjust `--max-ticks` and `--max-markets` to balance coverage vs speed.
+
+---
+
+## File: `decision_features.csv`
+
+One row per candle, enriched with timing, flow, and retrospective labels. This is the best starting point for learning entry rules.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `ticker` | str | Market ID |
+| `end_period_ts` | int | Candle end timestamp |
+| `minutes_to_close` | float | Minutes remaining until market close |
+| `minutes_from_open` | float | Minutes elapsed since market open |
+| `market_progress` | float | Fraction of market lifetime elapsed |
+| `candle_return_1/3/5` | float | Short-horizon momentum features |
+| `rolling_volatility_5` | float | 5-candle realized volatility |
+| `volume_vs_rolling_mean_5` | float | Volume spike indicator |
+| `spread` / `relative_spread` | float | Execution-cost proxy |
+| `trade_count` | float | Number of trades in the candle window |
+| `trade_contracts` | float | Total traded contracts in the window |
+| `yes_trade_contracts` / `no_trade_contracts` | float | Flow by aggressive side |
+| `trade_imbalance` | float | `(yes - no) / total`, buy-pressure signal |
+| `trade_vwap_yes` | float | Trade-flow VWAP for YES |
+| `trade_vwap_edge` | float | VWAP minus candle close price |
+| `distance_to_close_prob` | float | Final closing price minus current candle price |
+| `label_kind` | str | Whether this market has a clean binary outcome or a scalar settlement |
+| `label_usable` | bool | Filter on this before supervised training |
+| `result_binary` | int | Final market outcome |
+| `realized_edge_yes_entry` | float | Ex-post return if you bought YES at this candle close |
+| `realized_edge_no_entry` | float | Ex-post return if you bought NO at this candle close |
+
+### How to use it
+
+- Use momentum, volatility, spread, and trade imbalance as model inputs.
+- Use `minutes_to_close` and `market_progress` to separate pregame vs near-resolution behavior.
+- Filter to `label_usable == True` when training a YES/NO classifier or edge model.
+- Treat `realized_edge_yes_entry` and `realized_edge_no_entry` as labels for backtesting only, not live inputs.
+- If you cap `--max-ticks`, trade-flow columns become partial snapshots rather than full-flow measurements.

@@ -25,6 +25,7 @@ Outputs (in ./kalshi_data/):
     markets.csv              — flat market data + derived probabilities
     candlesticks.csv         — OHLC k-line rows (ticker, ts, O, H, L, C, vol)
     trades.csv               — tick-level trades (ticker, ts, price, size, side)
+    decision_features.csv    — model-ready candle rows + flow/timing labels
     raw_markets.json         — full API responses
     scrape_summary.json      — run metadata & stats
 """
@@ -38,7 +39,6 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 from typing import Optional
-from dataclasses import dataclass, field, asdict
 
 # ─── Configuration ──────────────────────────────────────────────────────────────
 
@@ -51,18 +51,38 @@ NBA_SERIES = ["kxnba", "nba"]
 NCAA_SERIES = ["kxncaab", "kxncaam", "ncaab", "ncaam", "kxmm", "marchmad"]
 
 NBA_TITLE_KW = [
-    "nba", "lakers", "celtics", "warriors", "knicks", "nets", "bucks",
-    "76ers", "sixers", "suns", "nuggets", "heat", "bulls", "cavaliers",
-    "mavericks", "clippers", "thunder", "timberwolves", "grizzlies",
-    "hawks", "hornets", "wizards", "pacers", "pistons", "magic",
-    "raptors", "kings", "spurs", "rockets", "pelicans", "blazers",
-    "jazz", "trail blazers", "pro basketball",
+    "nba",
+    "pro basketball",
 ]
 
-NCAA_TITLE_KW = [
-    "ncaa", "march madness", "college basketball", "ncaab", "ncaam",
-    "final four", "sweet sixteen", "elite eight", "round of 64",
-    "round of 32", "first four",
+NCAA_TITLE_KW_STRICT = [
+    "march madness",
+    "college basketball",
+    "ncaab",
+    "ncaam",
+]
+
+NCAA_TITLE_KW_CONTEXTUAL = [
+    "final four",
+    "sweet sixteen",
+    "elite eight",
+    "round of 64",
+    "round of 32",
+    "first four",
+]
+
+BASKETBALL_CONTEXT_KW = [
+    "basketball",
+    "points",
+    "rebounds",
+    "assists",
+    "three-pointers",
+    "3-pointers",
+    "double-double",
+    "triple-double",
+    "spread",
+    "moneyline",
+    "total points",
 ]
 
 
@@ -82,6 +102,62 @@ def safe_float(v) -> Optional[float]:
         return None
 
 
+def iso_to_ts(value) -> Optional[int]:
+    """Parse ISO timestamp strings into unix seconds."""
+    if not value:
+        return None
+    try:
+        return int(datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp())
+    except (ValueError, TypeError):
+        return None
+
+
+def safe_div(numerator, denominator) -> Optional[float]:
+    """Return numerator / denominator while protecting zero and missing values."""
+    if numerator is None or denominator in (None, 0):
+        return None
+    try:
+        return numerator / denominator
+    except ZeroDivisionError:
+        return None
+
+
+def derive_result_fields(market: dict) -> dict:
+    """
+    Normalize Kalshi resolution states into model-friendly label metadata.
+
+    `scalar` settlements on nominally binary props are not true YES/NO outcomes,
+    so they should be excluded from supervised training labels.
+    """
+    result_raw = market.get("result")
+    settlement_value = safe_float(market.get("settlement_value_dollars"))
+
+    result_binary = None
+    label_kind = "unresolved"
+    label_usable = False
+
+    if result_raw == "yes":
+        result_binary = 1
+        label_kind = "binary"
+        label_usable = True
+    elif result_raw in ("no", "all_no"):
+        result_binary = 0
+        label_kind = "binary"
+        label_usable = True
+    elif result_raw == "scalar":
+        label_kind = "scalar"
+    elif result_raw:
+        label_kind = "other"
+
+    return {
+        "result": result_raw,
+        "result_binary": result_binary,
+        "label_kind": label_kind,
+        "label_usable": label_usable,
+        "settlement_value": settlement_value,
+    }
+
+
 def classify(market: dict) -> Optional[str]:
     """Return 'NBA', 'NCAA', or None."""
     series = (market.get("series_ticker") or "").lower()
@@ -89,6 +165,7 @@ def classify(market: dict) -> Optional[str]:
     title = (market.get("title") or "").lower()
     subtitle = (market.get("subtitle") or market.get("sub_title") or "").lower()
     blob = f"{series} {event} {title} {subtitle}"
+    has_basketball_context = any(kw in blob for kw in BASKETBALL_CONTEXT_KW)
 
     for p in NCAA_SERIES:
         if p in series or p in event:
@@ -96,8 +173,11 @@ def classify(market: dict) -> Optional[str]:
     for p in NBA_SERIES:
         if p in series or p in event:
             return "NBA"
-    for kw in NCAA_TITLE_KW:
+    for kw in NCAA_TITLE_KW_STRICT:
         if kw in blob:
+            return "NCAA"
+    for kw in NCAA_TITLE_KW_CONTEXTUAL:
+        if kw in blob and has_basketball_context:
             return "NCAA"
     for kw in NBA_TITLE_KW:
         if kw in blob:
@@ -447,19 +527,45 @@ def phase2_candlesticks(
 
     print(f"  Markets with valid time windows: {len(tickers_with_ts)}")
 
-    # Group into batches of 100 with similar time windows
-    # For simplicity, use a global window = min(start)..max(end) for each batch
-    batch_size = 100
-    for i in range(0, len(tickers_with_ts), batch_size):
-        batch = tickers_with_ts[i : i + batch_size]
+    tickers_with_ts = sorted(tickers_with_ts, key=lambda row: (row["start_ts"], row["end_ts"]))
+
+    # Kalshi's batch endpoint is effectively limited by total candle volume, not just ticker count.
+    # Small dynamic batches avoid the "0 candles returned" failure mode at 1-minute granularity.
+    max_batch_tickers = 100
+    max_estimated_candles = 8000
+    batches = []
+    current_batch = []
+    current_estimated = 0
+    for item in tickers_with_ts:
+        estimated_candles = max(1, ((item["end_ts"] - item["start_ts"]) // (period_interval * 60)) + 1)
+        would_overflow = (
+            current_batch
+            and (
+                len(current_batch) >= max_batch_tickers
+                or current_estimated + estimated_candles > max_estimated_candles
+            )
+        )
+        if would_overflow:
+            batches.append(current_batch)
+            current_batch = []
+            current_estimated = 0
+
+        current_batch.append(item)
+        current_estimated += estimated_candles
+
+    if current_batch:
+        batches.append(current_batch)
+
+    for batch_num, batch in enumerate(batches, start=1):
         batch_tickers = [b["ticker"] for b in batch]
         batch_start = min(b["start_ts"] for b in batch)
         batch_end = max(b["end_ts"] for b in batch)
         league_map = {b["ticker"]: b["league"] for b in batch}
 
-        batch_num = i // batch_size + 1
-        total_batches = (len(tickers_with_ts) + batch_size - 1) // batch_size
-        print(f"    Batch {batch_num}/{total_batches}: {len(batch_tickers)} tickers...")
+        print(
+            f"    Batch {batch_num}/{len(batches)}: "
+            f"{len(batch_tickers)} tickers, window {batch_start}->{batch_end}"
+        )
 
         result = api.get_batch_candlesticks(
             tickers=batch_tickers,
@@ -467,6 +573,19 @@ def phase2_candlesticks(
             end_ts=batch_end,
             period_interval=period_interval,
         )
+
+        # If a large batch returns no candles, retry each ticker individually.
+        if batch_tickers and not any(result.get(ticker) for ticker in batch_tickers):
+            print("      Batch returned no candles, retrying tickers individually...")
+            result = {}
+            for item in batch:
+                single_result = api.get_batch_candlesticks(
+                    tickers=[item["ticker"]],
+                    start_ts=item["start_ts"],
+                    end_ts=item["end_ts"],
+                    period_interval=period_interval,
+                )
+                result.update(single_result)
 
         batch_candles = 0
         for ticker, candles in result.items():
@@ -476,8 +595,8 @@ def phase2_candlesticks(
                 all_candle_rows.append(row)
                 batch_candles += 1
 
-        if batch_num % 10 == 0 or batch_num == total_batches:
-            print(f"      → cumulative candle rows: {len(all_candle_rows)}")
+        if batch_num % 10 == 0 or batch_num == len(batches):
+            print(f"      → batch candles: {batch_candles}, cumulative: {len(all_candle_rows)}")
 
     print(f"\n  ✅ Phase 2 complete: {len(all_candle_rows)} candlestick rows")
     return all_candle_rows
@@ -557,22 +676,17 @@ def phase3_ticks(
 
 def flatten_market(m: dict) -> dict:
     """Convert raw market dict to flat row with betting-algo–ready fields."""
+    derived_league = classify(m) or m.get("_league", "")
+    result_info = derive_result_fields(m)
     last_p = safe_float(m.get("last_price_dollars"))
     yes_bid = safe_float(m.get("yes_bid_dollars"))
     yes_ask = safe_float(m.get("yes_ask_dollars"))
     no_bid = safe_float(m.get("no_bid_dollars"))
     no_ask = safe_float(m.get("no_ask_dollars"))
-    settle_val = safe_float(m.get("settlement_value_dollars"))
     volume = safe_float(m.get("volume_fp"))
     oi = safe_float(m.get("open_interest_fp"))
-    result_raw = m.get("result")  # "yes", "no", "all_no", etc.
-
-    # Binary result: 1 if YES won, 0 if NO won
-    result_binary = None
-    if result_raw == "yes":
-        result_binary = 1
-    elif result_raw in ("no", "all_no"):
-        result_binary = 0
+    result_raw = result_info["result"]
+    result_binary = result_info["result_binary"]
 
     # Implied probability at last trade
     implied_prob = last_p
@@ -594,7 +708,7 @@ def flatten_market(m: dict) -> dict:
         "ticker": m.get("ticker"),
         "event_ticker": m.get("event_ticker"),
         "series_ticker": m.get("series_ticker", ""),
-        "league": m.get("_league", ""),
+        "league": derived_league,
         "title": m.get("title", ""),
         "subtitle": m.get("subtitle", m.get("sub_title", "")),
         "yes_sub_title": m.get("yes_sub_title", ""),
@@ -603,8 +717,10 @@ def flatten_market(m: dict) -> dict:
         "status": m.get("status"),
         # ── Result ──
         "result": result_raw,
+        "label_kind": result_info["label_kind"],
+        "label_usable": result_info["label_usable"],
         "result_binary": result_binary,        # 1=YES won, 0=NO won
-        "settlement_value": settle_val,
+        "settlement_value": result_info["settlement_value"],
         # ── Prices ──
         "last_price": last_p,                  # = implied probability at close
         "yes_bid": yes_bid,
@@ -638,6 +754,310 @@ def flatten_market(m: dict) -> dict:
     }
 
 
+# ─── Decision-feature engineering ───────────────────────────────────────────────
+
+def build_trade_interval_features(
+    tick_rows: list[dict],
+    candle_interval_minutes: int,
+) -> pd.DataFrame:
+    """
+    Aggregate raw trades into candle-aligned flow features.
+    These features help identify whether aggressive YES/NO flow preceded a move.
+    """
+    columns = [
+        "ticker",
+        "end_period_ts",
+        "trade_count",
+        "trade_contracts",
+        "yes_trade_contracts",
+        "no_trade_contracts",
+        "trade_imbalance",
+        "trade_vwap_yes",
+        "avg_trade_size",
+        "max_trade_size",
+        "last_trade_yes_price",
+        "last_trade_no_price",
+    ]
+    if not tick_rows:
+        return pd.DataFrame(columns=columns)
+
+    df_t = pd.DataFrame(tick_rows).copy()
+    if df_t.empty or "created_time" not in df_t.columns:
+        return pd.DataFrame(columns=columns)
+
+    df_t["created_dt"] = pd.to_datetime(df_t["created_time"], utc=True, errors="coerce")
+    df_t = df_t.dropna(subset=["created_dt", "ticker"])
+    if df_t.empty:
+        return pd.DataFrame(columns=columns)
+
+    interval_seconds = candle_interval_minutes * 60
+    epoch_seconds = (df_t["created_dt"].astype("int64") // 10**9).astype("int64")
+    df_t["end_period_ts"] = ((epoch_seconds // interval_seconds) + 1) * interval_seconds
+
+    df_t["trade_rows"] = 1
+    df_t["contracts"] = pd.to_numeric(df_t["count"], errors="coerce").fillna(0.0)
+    df_t["yes_price"] = pd.to_numeric(df_t["yes_price"], errors="coerce")
+    df_t["no_price"] = pd.to_numeric(df_t["no_price"], errors="coerce")
+    df_t["yes_trade_contracts"] = df_t["contracts"].where(df_t["taker_side"] == "yes", 0.0)
+    df_t["no_trade_contracts"] = df_t["contracts"].where(df_t["taker_side"] == "no", 0.0)
+    df_t["trade_vwap_numerator"] = df_t["yes_price"].fillna(0.0) * df_t["contracts"]
+
+    df_t = df_t.sort_values(["ticker", "end_period_ts", "created_dt"])
+    grouped = df_t.groupby(["ticker", "end_period_ts"], as_index=False).agg(
+        trade_count=("trade_rows", "sum"),
+        trade_contracts=("contracts", "sum"),
+        yes_trade_contracts=("yes_trade_contracts", "sum"),
+        no_trade_contracts=("no_trade_contracts", "sum"),
+        trade_vwap_numerator=("trade_vwap_numerator", "sum"),
+        avg_trade_size=("contracts", "mean"),
+        max_trade_size=("contracts", "max"),
+        last_trade_yes_price=("yes_price", "last"),
+        last_trade_no_price=("no_price", "last"),
+    )
+
+    grouped["trade_imbalance"] = grouped.apply(
+        lambda row: safe_div(
+            row["yes_trade_contracts"] - row["no_trade_contracts"],
+            row["trade_contracts"],
+        ),
+        axis=1,
+    )
+    grouped["trade_vwap_yes"] = grouped.apply(
+        lambda row: safe_div(row["trade_vwap_numerator"], row["trade_contracts"]),
+        axis=1,
+    )
+
+    return grouped[columns]
+
+
+def build_decision_features(
+    markets: list[dict],
+    candle_rows: list[dict],
+    tick_rows: list[dict],
+    candle_interval_minutes: int,
+) -> pd.DataFrame:
+    """
+    Build one row per candle with timing, liquidity, momentum, and outcome labels.
+    This is the dataset you can backtest entry rules on.
+    """
+    if not candle_rows:
+        return pd.DataFrame()
+
+    df_c = pd.DataFrame(candle_rows).copy()
+    if df_c.empty:
+        return pd.DataFrame()
+
+    market_meta = []
+    for m in markets:
+        derived_league = classify(m)
+        if not derived_league:
+            continue
+        result_info = derive_result_fields(m)
+
+        close_ts = iso_to_ts(
+            m.get("close_time") or m.get("expiration_time") or m.get("latest_expiration_time")
+        )
+        open_ts = iso_to_ts(m.get("open_time"))
+
+        market_meta.append({
+            "ticker": m.get("ticker"),
+            "league": derived_league,
+            "title": m.get("title", ""),
+            "market_type": m.get("market_type"),
+            "market_open_ts": open_ts,
+            "market_close_ts": close_ts,
+            "market_duration_minutes": safe_div(
+                (close_ts - open_ts) if close_ts and open_ts else None,
+                60,
+            ),
+            "market_close_prob": safe_float(m.get("last_price_dollars")),
+            "label_kind": result_info["label_kind"],
+            "label_usable": result_info["label_usable"],
+            "result_binary": result_info["result_binary"],
+        })
+
+    df_meta = pd.DataFrame(market_meta).drop_duplicates(subset=["ticker"])
+    valid_tickers = set(df_meta["ticker"].dropna())
+
+    df_c["end_period_ts"] = pd.to_numeric(df_c["end_period_ts"], errors="coerce")
+    df_c = df_c[df_c["ticker"].isin(valid_tickers)].copy()
+    if df_c.empty:
+        return pd.DataFrame()
+
+    for col in [
+        "price_open",
+        "price_high",
+        "price_low",
+        "price_close",
+        "price_mean",
+        "price_previous",
+        "volume",
+        "open_interest",
+        "spread",
+        "yes_bid_close",
+        "yes_ask_close",
+    ]:
+        if col in df_c.columns:
+            df_c[col] = pd.to_numeric(df_c[col], errors="coerce")
+
+    df = df_c.merge(df_meta, on="ticker", how="left", suffixes=("", "_market"))
+    if "league_market" in df.columns:
+        df["league"] = df["league"].fillna(df["league_market"])
+        df = df.drop(columns=["league_market"])
+
+    df = df.sort_values(["ticker", "end_period_ts"]).reset_index(drop=True)
+
+    by_ticker_close = df.groupby("ticker")["price_close"]
+    by_ticker_volume = df.groupby("ticker")["volume"]
+
+    df["candle_return_1"] = by_ticker_close.diff()
+    df["candle_return_3"] = by_ticker_close.transform(lambda s: s - s.shift(3))
+    df["candle_return_5"] = by_ticker_close.transform(lambda s: s - s.shift(5))
+    df["rolling_price_mean_5"] = by_ticker_close.transform(
+        lambda s: s.rolling(5, min_periods=1).mean()
+    )
+    df["rolling_volatility_5"] = by_ticker_close.transform(
+        lambda s: s.rolling(5, min_periods=2).std()
+    )
+    df["rolling_volume_5"] = by_ticker_volume.transform(
+        lambda s: s.rolling(5, min_periods=1).sum()
+    )
+    df["rolling_volume_mean_5"] = by_ticker_volume.transform(
+        lambda s: s.rolling(5, min_periods=1).mean()
+    )
+
+    df["candle_range"] = df["price_high"] - df["price_low"]
+    df["candle_body"] = df["price_close"] - df["price_open"]
+    df["minutes_to_close"] = (df["market_close_ts"] - df["end_period_ts"]) / 60.0
+    df["minutes_from_open"] = (df["end_period_ts"] - df["market_open_ts"]) / 60.0
+    df["market_progress"] = df.apply(
+        lambda row: safe_div(row["minutes_from_open"], row["market_duration_minutes"]),
+        axis=1,
+    )
+    df["price_vs_rolling_mean_5"] = df["price_close"] - df["rolling_price_mean_5"]
+    df["volume_vs_rolling_mean_5"] = df.apply(
+        lambda row: safe_div(row["volume"], row["rolling_volume_mean_5"]),
+        axis=1,
+    )
+    df["relative_spread"] = df.apply(
+        lambda row: safe_div(row["spread"], row["price_close"]),
+        axis=1,
+    )
+    df["distance_to_close_prob"] = df["market_close_prob"] - df["price_close"]
+
+    df["realized_edge_yes_entry"] = df.apply(
+        lambda row: (
+            row["result_binary"] * (1.0 / row["price_close"]) - 1.0
+            if pd.notna(row["result_binary"])
+            and pd.notna(row["price_close"])
+            and row["price_close"] > 0
+            else None
+        ),
+        axis=1,
+    )
+    df["realized_edge_no_entry"] = df.apply(
+        lambda row: (
+            (1.0 - row["result_binary"]) * (1.0 / (1.0 - row["price_close"])) - 1.0
+            if pd.notna(row["result_binary"])
+            and pd.notna(row["price_close"])
+            and row["price_close"] < 1.0
+            else None
+        ),
+        axis=1,
+    )
+    df["label_yes_win"] = df["result_binary"]
+
+    trade_features = build_trade_interval_features(tick_rows, candle_interval_minutes)
+    if not trade_features.empty:
+        trade_features = trade_features[trade_features["ticker"].isin(valid_tickers)].copy()
+        df = df.merge(trade_features, on=["ticker", "end_period_ts"], how="left")
+    else:
+        for col in [
+            "trade_count",
+            "trade_contracts",
+            "yes_trade_contracts",
+            "no_trade_contracts",
+            "trade_imbalance",
+            "trade_vwap_yes",
+            "avg_trade_size",
+            "max_trade_size",
+            "last_trade_yes_price",
+            "last_trade_no_price",
+        ]:
+            df[col] = None
+
+    for col in [
+        "trade_count",
+        "trade_contracts",
+        "yes_trade_contracts",
+        "no_trade_contracts",
+        "avg_trade_size",
+        "max_trade_size",
+    ]:
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+
+    df["trade_imbalance"] = pd.to_numeric(df["trade_imbalance"], errors="coerce").fillna(0.0)
+    df["has_trade_flow"] = df["trade_count"] > 0
+    df["trade_vwap_edge"] = df["trade_vwap_yes"] - df["price_close"]
+
+    preferred_order = [
+        "ticker",
+        "league",
+        "title",
+        "market_type",
+        "end_period_ts",
+        "market_open_ts",
+        "market_close_ts",
+        "minutes_from_open",
+        "minutes_to_close",
+        "market_progress",
+        "price_open",
+        "price_high",
+        "price_low",
+        "price_close",
+        "price_mean",
+        "price_previous",
+        "candle_body",
+        "candle_range",
+        "candle_return_1",
+        "candle_return_3",
+        "candle_return_5",
+        "rolling_price_mean_5",
+        "rolling_volatility_5",
+        "price_vs_rolling_mean_5",
+        "volume",
+        "rolling_volume_5",
+        "rolling_volume_mean_5",
+        "volume_vs_rolling_mean_5",
+        "open_interest",
+        "spread",
+        "relative_spread",
+        "trade_count",
+        "trade_contracts",
+        "yes_trade_contracts",
+        "no_trade_contracts",
+        "trade_imbalance",
+        "trade_vwap_yes",
+        "trade_vwap_edge",
+        "avg_trade_size",
+        "max_trade_size",
+        "last_trade_yes_price",
+        "last_trade_no_price",
+        "has_trade_flow",
+        "market_close_prob",
+        "distance_to_close_prob",
+        "label_kind",
+        "label_usable",
+        "result_binary",
+        "label_yes_win",
+        "realized_edge_yes_entry",
+        "realized_edge_no_entry",
+    ]
+    ordered_columns = [col for col in preferred_order if col in df.columns]
+    remaining_columns = [col for col in df.columns if col not in ordered_columns]
+    return df[ordered_columns + remaining_columns]
+
+
 # ─── Save everything ────────────────────────────────────────────────────────────
 
 def save_all(
@@ -646,6 +1066,7 @@ def save_all(
     tick_rows: list[dict],
     output_dir: str,
     api_requests: int,
+    candle_interval_minutes: int,
 ):
     os.makedirs(output_dir, exist_ok=True)
 
@@ -665,6 +1086,9 @@ def save_all(
         df_c.to_csv(os.path.join(output_dir, "candlesticks.csv"), index=False)
         print(f"  ✓ candlesticks.csv         ({len(df_c)} rows)")
     else:
+        candle_path = os.path.join(output_dir, "candlesticks.csv")
+        if os.path.exists(candle_path):
+            os.remove(candle_path)
         print(f"  ⚠ candlesticks.csv         (skipped)")
 
     # 3. Trades / ticks
@@ -683,7 +1107,23 @@ def save_all(
         json.dump(markets, f, indent=2, default=str)
     print(f"  ✓ raw_markets.json         (full API data)")
 
-    # 5. Summary
+    # 5. Decision features
+    decision_df = build_decision_features(
+        markets=markets,
+        candle_rows=candle_rows,
+        tick_rows=tick_rows,
+        candle_interval_minutes=candle_interval_minutes,
+    )
+    if not decision_df.empty:
+        decision_df.to_csv(os.path.join(output_dir, "decision_features.csv"), index=False)
+        print(f"  ✓ decision_features.csv    ({len(decision_df)} rows)")
+    else:
+        decision_path = os.path.join(output_dir, "decision_features.csv")
+        if os.path.exists(decision_path):
+            os.remove(decision_path)
+        print(f"  ⚠ decision_features.csv    (requires candlestick data)")
+
+    # 6. Summary
     nba_count = sum(1 for m in flat if m.get("league") == "NBA")
     ncaa_count = sum(1 for m in flat if m.get("league") == "NCAA")
     summary = {
@@ -691,8 +1131,12 @@ def save_all(
         "total_markets": len(flat),
         "nba_markets": nba_count,
         "ncaa_markets": ncaa_count,
+        "label_usable_markets": int(sum(1 for m in flat if m.get("label_usable"))),
+        "scalar_settlement_markets": int(sum(1 for m in flat if m.get("label_kind") == "scalar")),
         "candlestick_rows": len(candle_rows),
         "trade_tick_rows": len(tick_rows),
+        "decision_feature_rows": len(decision_df),
+        "candle_interval_minutes": candle_interval_minutes,
         "api_requests_made": api_requests,
         "unique_series_tickers": list(set(m.get("series_ticker", "") for m in flat if m.get("series_ticker"))),
     }
@@ -756,7 +1200,14 @@ def main():
     print("\n" + "=" * 65)
     print("  SAVING RESULTS")
     print("=" * 65)
-    save_all(markets, candle_rows, tick_rows, args.output_dir, api.request_count)
+    save_all(
+        markets,
+        candle_rows,
+        tick_rows,
+        args.output_dir,
+        api.request_count,
+        args.candle_interval,
+    )
 
     # Final summary
     nba = sum(1 for m in markets if m.get("_league") == "NBA")
